@@ -23,8 +23,9 @@ MODES = collections.OrderedDict([
              "Drive with the buttons or WASD / arrow keys. Releasing stops the car.",
              False)),
     ("drive", ("Lane following",
-               "Follows the yellow (left) and red (right) lines by itself. "
-               "Put the car in the middle of the lane. It starts moving 3 s after Run.",
+               "Follows the yellow (left) and red (right) lines. "
+               "Put the car in the left lane. Left and Right appear while this is running. "
+               "Press one to move into that lane and stay there. It starts moving 3 s after Run.",
                True)),
     ("straight_test", ("Straight-line test",
                        "Drives 1 m straight using the wheel encoders. Car on the floor. "
@@ -67,6 +68,9 @@ _stop_event = None
 _result = ""              # how the last run ended
 _heartbeat = time.monotonic()
 detail = ""               # one live status line from the running mode
+_lane_left = False        # a lane change that way is available right now
+_lane_right = False
+_lane_request = None      # "left" or "right" from the page, not yet taken
 
 
 # ---------------------------------------------------------------- log
@@ -115,6 +119,44 @@ def heartbeat():
     """The web page calls this while it is open."""
     global _heartbeat
     _heartbeat = time.monotonic()
+
+
+def set_lane_availability(left, right):
+    global _lane_left, _lane_right
+    with _lock:
+        _lane_left = bool(left)
+        _lane_right = bool(right)
+
+
+def lane_availability():
+    with _lock:
+        return _lane_left, _lane_right
+
+
+def request_lane_change(direction):
+    """Remember a Left or Right press. Only while lane following is running,
+    and only when that side is available."""
+    global _lane_request
+    if direction not in ("left", "right"):
+        return False
+    with _lock:
+        if _running != "drive":
+            return False
+        if direction == "left" and not _lane_left:
+            return False
+        if direction == "right" and not _lane_right:
+            return False
+        _lane_request = direction
+        return True
+
+
+def take_lane_request():
+    """The drive loop takes the press, once."""
+    global _lane_request
+    with _lock:
+        direction = _lane_request
+        _lane_request = None
+        return direction
 
 
 def status():
@@ -230,13 +272,17 @@ def _run_drive(stop_event):
     import vision
     from controller import LaneFollower
     from lidar import Lidar
-    from planner import IDLE, Planner
+    from planner import IDLE, FOLLOW_LANE, SLOW, Planner
 
     planner = Planner()
     follower = LaneFollower()
     lidar = Lidar()
+    vision.reset_lane_track()
+    take_lane_request()
+    set_lane_availability(False, False)
     go_at = time.monotonic() + config.DRIVE_START_DELAY_S
-    print(f"Lane following starts in {config.DRIVE_START_DELAY_S:.0f} s.")
+    print(f"Lane following starts in {config.DRIVE_START_DELAY_S:.0f} s. "
+          f"Starting in lane {config.START_LANE}.")
     last_id = None
     last_print = 0.0
     rec = _Recorder() if config.RECORD_DRIVE else None
@@ -260,8 +306,12 @@ def _run_drive(stop_event):
             planner.start()
             print("Lane following: GO")
         obstacles = lidar.read()
+        request = take_lane_request()
+        if request and planner.state in (IDLE, FOLLOW_LANE, SLOW):
+            planner.request(request)
         state, speed, target = planner.update(lane, obstacles, car_link.telemetry)
-        left, right = follower.update(lane, speed, target)
+        set_lane_availability(planner.left_available, planner.right_available)
+        left, right = follower.update(lane, speed, target, relock=planner.relock)
         car_link.set_wheel_speeds(left, right)
         if rec is not None and planner.state != IDLE:
             rec.add(frame_id, lane, follower, planner.state, left, right)
@@ -273,12 +323,16 @@ def _run_drive(stop_event):
         seen = "no lane" if lane is None else \
             f"off {lane.offset * 100:+.1f} cm, head {lane.heading:+.2f}"
         front = "---" if obstacles.front == float("inf") else f"{obstacles.front:.2f} m"
-        detail = (f"{state} | {seen} | turn {follower.omega:+.2f} | "
+        changing = f" {planner.change_direction} {planner.phase}" if planner.phase else ""
+        detail = (f"lane {planner.lane_index} | {state}{changing} | {seen} | "
+                  f"turn {follower.omega:+.2f} | "
                   f"rejected {follower.rejected} | "
                   f"L {left:.2f} R {right:.2f} m/s | front {front}")
         if now - last_print > 0.5:
             last_print = now
             print(detail)
+    set_lane_availability(False, False)
+    take_lane_request()
 
 
 class _Recorder:

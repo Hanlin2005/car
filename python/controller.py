@@ -45,8 +45,13 @@ class LaneFollower:
         self.lane_lost = False
         self.omega = 0.0          # last turn rate (rad/s), for printing
 
-    def update(self, lane, speed, target_offset, now=None):
-        """Return (left, right) wheel speeds in m/s."""
+    def update(self, lane, speed, target_offset, now=None, relock=False):
+        """Return (left, right) wheel speeds in m/s.
+
+        relock is set for the frame a lane change lands on the new lines.
+        The measured center jumps by about a lane width, so the smoothed
+        offset has to be dropped or that jump is thrown away.
+        """
         now = time.monotonic() if now is None else now
         dt = 0.05 if self._last_time is None else min(max(now - self._last_time, 0.001), 0.5)
         self._last_time = now
@@ -55,6 +60,11 @@ class LaneFollower:
             self.reset()
             self._last_time = now
             return 0.0, 0.0
+
+        if relock:
+            self._offset = None
+            self._heading = None
+            self._rejects = 0
 
         if not config.VISION_CONTROL:
             self._omega = self.omega = 0.0

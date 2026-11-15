@@ -14,6 +14,14 @@ import config
 _lock = threading.Lock()
 _state = {"id": 0, "time": 0.0, "lane": None, "jpeg": None, "frame": None}
 _started = False
+_reset_track = False
+
+
+def reset_lane_track():
+    """Forget the lines followed last frame. The next frame locks onto the lane ahead."""
+    global _reset_track
+    with _lock:
+        _reset_track = True
 
 
 def latest():
@@ -34,6 +42,7 @@ def camera_ok():
 
 
 def _loop():
+    global _reset_track
     from camera import Camera
     from lane_detector import LaneDetector
     camera = Camera()
@@ -47,6 +56,11 @@ def _loop():
             if frame is None:
                 time.sleep(0.1)
                 continue
+            with _lock:
+                do_reset = _reset_track
+                _reset_track = False
+            if do_reset:
+                detector.reset_track()
             lane = detector.detect(frame)
             shown = detector.draw(frame) if config.SHOW_LANES else frame
             ok, buf = cv2.imencode(".jpg", shown, [int(cv2.IMWRITE_JPEG_QUALITY), 60])

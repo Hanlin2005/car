@@ -36,12 +36,16 @@ LANE_LOST_TIMEOUT_S = 0.5    # lane gone this long -> stop (shorter gaps: drive 
 DRIVE_START_DELAY_S = 3.0    # lane following waits this long after Run before moving
 RECORD_DRIVE = True          # save camera frames + a CSV of each lane-following run in runs/
 RECORD_MAX_FRAMES = 3000     # about 100 s at 30 fps, roughly 30 MB
-LANE_CHANGE_ENABLED = False  # single lane: slow, then stop for obstacles; never change lanes
-
 # --- Obstacle distances (m) ---
 STOP_DISTANCE = 0.30         # something this close ahead -> STOP
-SLOW_DISTANCE = 0.80         # something this close ahead -> SLOW / consider lane change
+SLOW_DISTANCE = 0.80         # something this close ahead -> drive slower
 SIDE_CLEAR_DISTANCE = 1.00   # side must be clear this far to change lanes
+LANE_COUNT = 2               # marked lanes on the course
+START_LANE = 0               # leftmost lane. The car starts here.
+LANE_CHANGE_TIMEOUT_S = 4.0  # stop if a lane change has not finished by then
+LANE_CHANGE_SETTLE_S = 0.4   # new lane must stay centered at least this long
+LANE_CHANGE_DONE_M = 0.06    # centered: offset smaller than this
+LANE_CHANGE_DONE_HEADING = 0.12  # and heading smaller than this (radians)
 # Last-resort stop inside the motor loop, closer than STOP_DISTANCE.
 # Keep this equal to STOP_DISTANCE_M in sketch/sketch.ino. The VL53L0X and the lidar both use it.
 ESTOP_DISTANCE_M = 0.15

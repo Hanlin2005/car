@@ -110,6 +110,15 @@ _PAGE = r"""<!DOCTYPE html>
   </label>
   <p class="note">1.0 is the normal steering strength. Off drives straight and ignores the lane lines. A close obstacle still stops the car.</p>
 
+  <div id="lanes" class="hidden">
+    <h2>Change lane</h2>
+    <div class="runbar">
+      <button type="button" id="lane-left" disabled>Left: not available</button>
+      <button type="button" id="lane-right" disabled>Right: not available</button>
+    </div>
+    <p class="note">Available means that lane is in view, that side is clear, and the car is not already at that edge. The car stays in the new lane.</p>
+  </div>
+
   <div id="lamps" class="hidden">
     <h2>Lamps</h2>
     <label class="check">
@@ -187,6 +196,8 @@ const sensorsEl = document.getElementById("sensors");
 const logEl = document.getElementById("log");
 const runBtn = document.getElementById("run");
 const haltBtn = document.getElementById("halt");
+const laneLeft = document.getElementById("lane-left");
+const laneRight = document.getElementById("lane-right");
 const keys = {ArrowUp:"forward", w:"forward", W:"forward",
               ArrowDown:"back", s:"back", S:"back",
               ArrowLeft:"left", a:"left", A:"left",
@@ -239,6 +250,8 @@ function apply(data) {
   drawModes();
   document.getElementById("manual").classList.toggle("hidden", !manual);
   document.getElementById("lamps").classList.toggle("hidden", running !== "light_test");
+  document.getElementById("lanes").classList.toggle("hidden", running !== "drive");
+  showLanes(data);
   runBtn.disabled = running !== null;
   haltBtn.disabled = running === null;
   stateEl.classList.toggle("bad", data.result && data.result.startsWith("error"));
@@ -366,6 +379,22 @@ function postVision() {
 }
 vision.addEventListener("change", postVision);
 visionGain.addEventListener("input", postVision);
+
+function showLanes(data) {
+  const left = running === "drive" && !!data.lane_left;
+  const right = running === "drive" && !!data.lane_right;
+  laneLeft.disabled = !left;
+  laneRight.disabled = !right;
+  laneLeft.textContent = left ? "Left: available" : "Left: not available";
+  laneRight.textContent = right ? "Right: available" : "Right: not available";
+}
+function changeLane(direction) {
+  const button = direction === "left" ? laneLeft : laneRight;
+  if (button.disabled) return;
+  post("/lane-change", {direction: direction}).catch(() => {});
+}
+laneLeft.addEventListener("click", () => changeLane("left"));
+laneRight.addEventListener("click", () => changeLane("right"));
 
 function postLamps() {
   post("/lamps", {rear1: rear1.checked, rear2: rear2.checked, head: head.checked}).catch(() => {});
@@ -544,7 +573,7 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = self.path.split("?", 1)[0]
         if path in ("/drive", "/status", "/stream.mjpg", "/mode", "/run", "/stop",
-                    "/straight-hold", "/vision", "/speed", "/lamps"):
+                    "/straight-hold", "/vision", "/speed", "/lamps", "/lane-change"):
             return
         super().log_message(fmt, *args)
 
@@ -619,6 +648,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._speed()
             elif path == "/lamps":
                 self._lamps()
+            elif path == "/lane-change":
+                self._lane_change()
             else:
                 self._send(404, "Not found\n", "text/plain; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
@@ -697,6 +728,19 @@ class _Handler(BaseHTTPRequestHandler):
         hardware.set_lamps(rear1, rear2, head)
         self._json(200, hardware.lamp_state())
 
+    def _lane_change(self):
+        try:
+            direction = self._body().get("direction")
+            if direction not in ("left", "right"):
+                raise ValueError("direction must be left or right")
+        except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        if not modes.request_lane_change(direction):
+            self._json(409, {"error": "that lane is not available"})
+            return
+        self._json(200, self._status(None))
+
     def _status(self, since):
         out = modes.status()
         out.update({
@@ -715,6 +759,9 @@ class _Handler(BaseHTTPRequestHandler):
             "speed": float(config.CRUISE_SPEED),
             "lamps": hardware.lamp_state(),
         })
+        lane_left, lane_right = modes.lane_availability()
+        out["lane_left"] = lane_left
+        out["lane_right"] = lane_right
         if since is not None:
             lines, next_id = modes.log.since(since)
             out["log"] = [line for _, line in lines]
