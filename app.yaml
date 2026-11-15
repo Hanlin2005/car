@@ -1,0 +1,6 @@
+name: Autonomous Car
+description: Lane following car. Microcontroller drives the MDD3A; Linux side serves the page.
+ports:
+  - 8080
+bricks: []
+icon: 😀

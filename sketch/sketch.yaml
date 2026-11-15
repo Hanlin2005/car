@@ -1,0 +1,8 @@
+profiles:
+  default:
+    platforms:
+      - platform: arduino:zephyr
+    libraries:
+      - VL53L0X
+      - BH1750
+default_profile: default
