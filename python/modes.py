@@ -41,6 +41,22 @@ MODES = collections.OrderedDict([
     ("lidar_test", ("Lidar test",
                     "Prints front / back / left / right distances. The wheels don't move.",
                     False)),
+    ("light_test", ("Light test",
+                    "Switches for each lamp. The wheels don't move. "
+                    "Automatic lights resume after Stop.",
+                    False)),
+    ("sensor_test", ("Sensor test",
+                     "Prints the time-of-flight distance, the light level, and the lidar "
+                     "distances. The wheels don't move.",
+                     False)),
+    ("motor1_test", ("Motor1",
+                     "PROP THE CAR UP. Runs Motor1 (right command) forward and back. "
+                     "Prints both encoder readings.",
+                     True)),
+    ("motor2_test", ("Motor2",
+                     "PROP THE CAR UP. Runs Motor2 (left command) forward and back. "
+                     "Prints both encoder readings.",
+                     True)),
 ])
 
 _lock = threading.RLock()
@@ -330,6 +346,26 @@ def _run_lidar(stop_event):
         lidartest.loop()
 
 
+def _run_light(stop_event):
+    import benchtest
+    benchtest.light_loop(stop_event)
+
+
+def _run_sensors(stop_event):
+    import benchtest
+    benchtest.sensor_loop(stop_event)
+
+
+def _run_motor1(stop_event):
+    import benchtest
+    benchtest.motor_loop(stop_event, "motor1")
+
+
+def _run_motor2(stop_event):
+    import benchtest
+    benchtest.motor_loop(stop_event, "motor2")
+
+
 _RUNNERS = {
     "web": _run_web,
     "drive": _run_drive,
@@ -337,4 +373,8 @@ _RUNNERS = {
     "motor_test": _run_motor,
     "duty_test": _run_duty,
     "lidar_test": _run_lidar,
+    "light_test": _run_light,
+    "sensor_test": _run_sensors,
+    "motor1_test": _run_motor1,
+    "motor2_test": _run_motor2,
 }

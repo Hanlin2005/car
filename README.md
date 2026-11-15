@@ -1,12 +1,10 @@
 # Autonomous Car (Arduino Uno Q)
 
-Same car program as the Raspberry Pi copy, running on an Arduino Uno Q.
 The microcontroller in `sketch/sketch.ino` drives the motors, reads the
 encoders, the lidar, the VL53L0X, and the BH1750. The Linux side runs the
 camera, the lane logic, and the page. Pin numbers live in `sketch/pins.h`.
 
-The Pi version stays in the `autonomous-car` folder. Open **this** folder
-in Arduino App Lab.
+Open this folder in Arduino App Lab.
 
 ## What plugs in where
 

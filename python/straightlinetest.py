@@ -9,7 +9,6 @@ import time
 import car_link
 import config
 
-TEST_SPEED = 0.30       # m/s (~50% duty; motors are steadier at higher duty)
 TEST_DISTANCE = 1.00    # m to drive before stopping
 KP_STRAIGHT = 4.0       # how hard to correct drift (rad/s per rad of heading error)
 START_DELAY_S = 3.0     # time to put the car down before it moves
@@ -95,8 +94,8 @@ def loop():
     # Steer back toward the starting heading
     omega = -KP_STRAIGHT * heading
     half_base = config.WHEEL_BASE_M / 2
-    left = TEST_SPEED - omega * half_base
-    right = TEST_SPEED + omega * half_base
+    left = config.CRUISE_SPEED - omega * half_base
+    right = config.CRUISE_SPEED + omega * half_base
     car_link.set_wheel_speeds(left, right)
 
     print(f"L={left_dist:.3f} R={right_dist:.3f} heading={heading:+.3f} "

@@ -14,6 +14,8 @@ WHEEL_BASE_M = 0.15          # distance between the two driven wheels (TODO: mea
 METERS_PER_TICK = 0.0005     # wheel circumference / encoder ticks per revolution
 
 # --- Speeds (m/s) ---
+# The page's speed slider sets these while a run is going.
+# SLOW_SPEED stays half of CRUISE_SPEED.
 CRUISE_SPEED = 0.30
 SLOW_SPEED = 0.15
 

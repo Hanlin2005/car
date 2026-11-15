@@ -92,6 +92,12 @@ _PAGE = r"""<!DOCTYPE html>
   <p id="detail"></p>
   <p id="sensors"></p>
 
+  <label class="speed">Speed
+    <input id="speed" type="range" min="0.05" max="0.57" step="0.01" value="0.30">
+    <span id="speed-label">0.30 m/s</span>
+  </label>
+  <p class="note">Manual driving, lane following, and the straight-line test use this speed. A close obstacle uses half of it.</p>
+
   <h2>Vision lane following</h2>
   <label class="check">
     <input id="vision" type="checkbox" checked>
@@ -104,13 +110,25 @@ _PAGE = r"""<!DOCTYPE html>
   </label>
   <p class="note">1.0 is the normal steering strength. Off drives straight and ignores the lane lines. A close obstacle still stops the car.</p>
 
+  <div id="lamps" class="hidden">
+    <h2>Lamps</h2>
+    <label class="check">
+      <input id="rear1" type="checkbox">
+      Rear light 1
+    </label>
+    <label class="check">
+      <input id="rear2" type="checkbox">
+      Rear light 2
+    </label>
+    <label class="check">
+      <input id="head" type="checkbox">
+      Headlights
+    </label>
+  </div>
+
   <div id="manual" class="hidden">
     <h2>Manual driving</h2>
     <p id="link"></p>
-    <label class="speed">Speed
-      <input id="speed" type="range" min="0.05" max="0.57" step="0.01" value="0.57">
-      <span id="speed-label">0.57 m/s</span>
-    </label>
     <label class="speed">Correction
       <input id="correction" type="range" min="-100" max="100" step="1" value="0">
       <span id="correction-label">Off</span>
@@ -156,6 +174,9 @@ const vision = document.getElementById("vision");
 const visionLabel = document.getElementById("vision-label");
 const visionGain = document.getElementById("vision-gain");
 const visionGainLabel = document.getElementById("vision-gain-label");
+const rear1 = document.getElementById("rear1");
+const rear2 = document.getElementById("rear2");
+const head = document.getElementById("head");
 const link = document.getElementById("link");
 const novideo = document.getElementById("novideo");
 const modesEl = document.getElementById("modes");
@@ -217,6 +238,7 @@ function apply(data) {
   manual = running === "web";
   drawModes();
   document.getElementById("manual").classList.toggle("hidden", !manual);
+  document.getElementById("lamps").classList.toggle("hidden", running !== "light_test");
   runBtn.disabled = running !== null;
   haltBtn.disabled = running === null;
   stateEl.classList.toggle("bad", data.result && data.result.startsWith("error"));
@@ -282,9 +304,18 @@ async function send() {
   }
 }
 
-speed.addEventListener("input", () => {
+function showSpeed() {
   speedLabel.textContent = Number(speed.value).toFixed(2) + " m/s";
-});
+}
+const savedSpeed = Number(localStorage.getItem("speed"));
+if (savedSpeed >= 0.05 && savedSpeed <= 0.57) speed.value = String(savedSpeed);
+showSpeed();
+function postSpeed() {
+  localStorage.setItem("speed", speed.value);
+  showSpeed();
+  post("/speed", {speed: Number(speed.value)}).catch(() => {});
+}
+speed.addEventListener("input", postSpeed);
 
 function showSensors(data) {
   const tof = typeof data.tof_m === "number" && data.tof_m >= 0
@@ -336,6 +367,13 @@ function postVision() {
 vision.addEventListener("change", postVision);
 visionGain.addEventListener("input", postVision);
 
+function postLamps() {
+  post("/lamps", {rear1: rear1.checked, rear2: rear2.checked, head: head.checked}).catch(() => {});
+}
+rear1.addEventListener("change", postLamps);
+rear2.addEventListener("change", postLamps);
+head.addEventListener("change", postLamps);
+
 document.querySelectorAll("button[data-dir]").forEach((button) => {
   button.addEventListener("pointerdown", (event) => {
     event.preventDefault();
@@ -369,7 +407,8 @@ haltBtn.addEventListener("click", haltAll);
 
 window.addEventListener("keydown", (event) => {
   if (event.target === speed || event.target === correction || event.target === straightHold ||
-      event.target === vision || event.target === visionGain) return;
+      event.target === vision || event.target === visionGain ||
+      event.target === rear1 || event.target === rear2 || event.target === head) return;
   if (event.key === " " || event.key === "Escape") {
     event.preventDefault();
     if (manual) {
@@ -414,6 +453,14 @@ async function refresh() {
     if (typeof data.vision === "boolean" && typeof data.vision_gain === "number" &&
         (data.vision !== vision.checked || Math.abs(data.vision_gain - Number(visionGain.value)) > 0.001)) {
       postVision();
+    }
+    if (typeof data.speed === "number" && Math.abs(data.speed - Number(speed.value)) > 0.001) {
+      postSpeed();
+    }
+    if (running === "light_test" && data.lamps &&
+        (data.lamps.rear1 !== rear1.checked || data.lamps.rear2 !== rear2.checked ||
+         data.lamps.head !== head.checked)) {
+      postLamps();
     }
     if (data.log.length) {
       const atBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 4;
@@ -497,7 +544,7 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = self.path.split("?", 1)[0]
         if path in ("/drive", "/status", "/stream.mjpg", "/mode", "/run", "/stop",
-                    "/straight-hold", "/vision"):
+                    "/straight-hold", "/vision", "/speed", "/lamps"):
             return
         super().log_message(fmt, *args)
 
@@ -568,6 +615,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._straight_hold()
             elif path == "/vision":
                 self._vision()
+            elif path == "/speed":
+                self._speed()
+            elif path == "/lamps":
+                self._lamps()
             else:
                 self._send(404, "Not found\n", "text/plain; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
@@ -616,6 +667,36 @@ class _Handler(BaseHTTPRequestHandler):
         config.VISION_GAIN = max(0.0, min(3.0, gain))
         self._json(200, {"vision": config.VISION_CONTROL, "vision_gain": config.VISION_GAIN})
 
+    def _speed(self):
+        try:
+            speed = float(self._body().get("speed"))
+            if speed != speed or speed in (float("inf"), float("-inf")):
+                raise ValueError("speed must be a number")
+        except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        speed = max(0.05, min(config.WEB_MAX_SPEED, speed))
+        config.CRUISE_SPEED = speed
+        config.SLOW_SPEED = speed / 2.0
+        self._json(200, {"speed": config.CRUISE_SPEED})
+
+    def _lamps(self):
+        if modes.status()["running"] != "light_test":
+            self._json(409, {"error": "light test is not running"})
+            return
+        try:
+            payload = self._body()
+            rear1 = payload.get("rear1")
+            rear2 = payload.get("rear2")
+            head = payload.get("head")
+            if not all(isinstance(flag, bool) for flag in (rear1, rear2, head)):
+                raise ValueError("rear1, rear2, and head must be true or false")
+        except (TypeError, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        hardware.set_lamps(rear1, rear2, head)
+        self._json(200, hardware.lamp_state())
+
     def _status(self, since):
         out = modes.status()
         out.update({
@@ -631,6 +712,8 @@ class _Handler(BaseHTTPRequestHandler):
             "straight_hold": car_link.straight_hold_enabled(),
             "vision": bool(config.VISION_CONTROL),
             "vision_gain": float(config.VISION_GAIN),
+            "speed": float(config.CRUISE_SPEED),
+            "lamps": hardware.lamp_state(),
         })
         if since is not None:
             lines, next_id = modes.log.since(since)

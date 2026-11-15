@@ -219,16 +219,18 @@ float readTofFront() {
 void updateLights() {
   if (!lightOk) {
     lux = -1;
-    writeLights(false);
+    if (runMode != "light_test") writeLights(false);
     return;
   }
   float reading = lightMeter.readLightLevel();
   if (reading < 0 || reading != reading) {
     lux = -1;
-    writeLights(false);
+    if (runMode != "light_test") writeLights(false);
     return;
   }
   lux = reading;
+  // Light test drives the pins itself. Keep reading lux for the log.
+  if (runMode == "light_test") return;
   if (!lightsOn && lux < LIGHT_ON_LUX) writeLights(true);
   else if (lightsOn && lux > LIGHT_OFF_LUX) writeLights(false);
 }
@@ -258,7 +260,17 @@ void stop_car() {
 }
 
 void set_mode(String mode) {
+  if (runMode == "light_test" && mode != "light_test") writeLights(false);
   runMode = mode;
+}
+
+// Light test only. Each argument turns that lamp on or off.
+void set_lamps(bool rear1, bool rear2, bool head) {
+  if (runMode != "light_test") return;
+  digitalWrite(REAR_LIGHT_1, rear1 ? HIGH : LOW);
+  digitalWrite(REAR_LIGHT_2, rear2 ? HIGH : LOW);
+  digitalWrite(HEADLIGHTS, head ? HIGH : LOW);
+  lightsOn = rear1 || rear2 || head;
 }
 
 // Web page toggle. Off leaves the commanded wheel speeds alone.
@@ -364,6 +376,7 @@ void setup() {
   Bridge.provide("stop", stop_car);
   Bridge.provide("set_mode", set_mode);
   Bridge.provide("set_straight_hold", set_straight_hold);
+  Bridge.provide("set_lamps", set_lamps);
 
   setupMotors();
   setupEncoders();

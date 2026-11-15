@@ -49,6 +49,9 @@ _pending = {
     "right": 0.0,
     "mode": "idle",
     "straight_hold": True,   # encoder-difference straightening, web page toggle
+    "rear1": False,
+    "rear2": False,
+    "head": False,
 }
 _started = False
 _Bridge = None
@@ -101,8 +104,7 @@ def start():
         from arduino.app_utils import Bridge
     except ImportError:
         raise SystemExit(
-            "This folder runs on the Arduino Uno Q, inside Arduino App Lab.\n"
-            "The Pi copy stays in the autonomous-car folder."
+            "This folder runs on the Arduino Uno Q, inside Arduino App Lab."
         )
     _Bridge = Bridge
     Bridge.provide("telemetry", _on_telemetry)
@@ -111,7 +113,8 @@ def start():
     Bridge.provide("sensors", _on_sensors)
     with _lock:
         _pending["mode"] = config.MODE if config.MODE in (
-            "web", "drive", "straight_test", "duty_test", "motor_test", "lidar_test"
+            "web", "drive", "straight_test", "duty_test", "motor_test", "lidar_test",
+            "light_test", "sensor_test", "motor1_test", "motor2_test",
         ) else "idle"
     _started = True
     print("Uno Q: waiting for the microcontroller (pin numbers are in sketch/pins.h).")
@@ -127,8 +130,12 @@ def pump():
         right = _pending["right"]
         mode = _pending["mode"]
         straight_hold = _pending["straight_hold"]
+        rear1 = _pending["rear1"]
+        rear2 = _pending["rear2"]
+        head = _pending["head"]
     _Bridge.notify("set_mode", mode)
     _Bridge.notify("set_straight_hold", bool(straight_hold))
+    _Bridge.notify("set_lamps", bool(rear1), bool(rear2), bool(head))
     if kind == "speed":
         _Bridge.notify("set_wheel_speeds", float(left), float(right))
     elif kind == "duty":
@@ -139,7 +146,29 @@ def pump():
 
 def set_mode(name):
     with _lock:
-        _pending["mode"] = str(name)
+        name = str(name)
+        _pending["mode"] = name
+        if name != "light_test":
+            _pending["rear1"] = False
+            _pending["rear2"] = False
+            _pending["head"] = False
+
+
+def set_lamps(rear1, rear2, head):
+    """Drive the three lamp pins. The sketch applies this only in light test."""
+    with _lock:
+        _pending["rear1"] = bool(rear1)
+        _pending["rear2"] = bool(rear2)
+        _pending["head"] = bool(head)
+
+
+def lamp_state():
+    with _lock:
+        return {
+            "rear1": bool(_pending["rear1"]),
+            "rear2": bool(_pending["rear2"]),
+            "head": bool(_pending["head"]),
+        }
 
 
 def set_straight_hold(enabled):
