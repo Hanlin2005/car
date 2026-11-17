@@ -25,7 +25,7 @@ telemetry = {
 }
 
 sensors = {
-    "tof_m": -1.0,           # VL53L0X distance, meters; -1 if there is no reading
+    "tof_m": -1.0,           # VL53L1X distance, meters; -1 if there is no reading
     "lux": -1.0,             # BH1750; -1 if there is no reading
     "lights_on": False,
 }

@@ -2,7 +2,7 @@
 # The microcontroller pins are in sketch/pins.h.
 
 # --- What to run ---
-# Modes are picked and started on the web page (http://car.local:8080).
+# Modes are picked and started on the web page (http://10.194.91.71:8080).
 # This only chooses which one is selected when the program starts.
 # "web" (manual driving) also starts running right away; the others wait
 # for the Run button.
@@ -47,7 +47,7 @@ LANE_CHANGE_SETTLE_S = 0.4   # new lane must stay centered at least this long
 LANE_CHANGE_DONE_M = 0.06    # centered: offset smaller than this
 LANE_CHANGE_DONE_HEADING = 0.12  # and heading smaller than this (radians)
 # Last-resort stop inside the motor loop, closer than STOP_DISTANCE.
-# Keep this equal to STOP_DISTANCE_M in sketch/sketch.ino. The VL53L0X and the lidar both use it.
+# Keep this equal to STOP_DISTANCE_M in sketch/sketch.ino. The VL53L1X and the lidar both use it.
 ESTOP_DISTANCE_M = 0.15
 # Bench tests leave the lidar staring at a wall, so the emergency stop
 # stays off for those. "drive" and "straight_test" still stop.
@@ -56,14 +56,19 @@ ESTOP_DISTANCE_M = 0.15
 ESTOP_MODES = ("drive", "straight_test")
 CMD_TIMEOUT_S = 0.30         # coast if wheel commands stop arriving
 
-# --- Camera (USB webcam on the Uno Q) ---
-CAMERA_INDEX = 0             # /dev/video0
+# --- Camera (MIPI-CSI camera on the UNO Media Carrier) ---
+CAMERA_SOURCE = "csi"        # "csi" = Media Carrier camera via libcamera, "usb" = USB webcam
+CAMERA_INDEX = 0             # /dev/video0, only used when CAMERA_SOURCE = "usb"
+# "none" | "180" | "horizontal" | "vertical". Use "180" if the ribbon cable
+# forces the camera to be mounted upside down. Lanes must look right on the page.
+CAMERA_FLIP = "none"
 FRAME_WIDTH = 320
 FRAME_HEIGHT = 240
 
 # --- Lane detection (lane_detector.py) ---
 # Left line is YELLOW, right line is RED. OpenCV HSV: H 0-179, S 0-255, V 0-255.
 # Red wraps around hue 0, so it needs two ranges.
+# Tuned on the old USB webcam. The CSI camera sees color differently: retune.
 LEFT_LINE_HSV_RANGES = [((18, 90, 90), (35, 255, 255))]          # yellow
 RIGHT_LINE_HSV_RANGES = [((0, 100, 70), (10, 255, 255)),
                          ((165, 100, 70), (179, 255, 255))]      # red
@@ -75,11 +80,12 @@ LANE_MIN_BAND_PIXELS = 4
 LANE_DEFAULT_WIDTH_FRAC = 0.8   # lane width guess (fraction of image width) before both lines seen
 LANE_MIN_WIDTH_FRAC = 0.2       # narrower than this = bad detection, don't learn it
 LANE_HORIZON_FRAC = 0.4      # horizon row guess (fraction of image height); learned once both lines are seen
-CAMERA_HFOV_DEG = 62         # webcam horizontal field of view (C920 at 4:3 is about 62)
+CAMERA_HFOV_DEG = 62         # camera horizontal field of view (TODO: set from the CSI camera's spec; 62 was the C920)
 SHOW_LANES = True            # draw the detected lines on the camera video
 
 # --- Web remote (MODE = "web") ---
-# Open http://car.local:8080 on a computer on the same network.
+# Open http://10.194.91.71:8080 on a computer on the same network.
+CAR_IP = "10.194.91.71"      # the Uno Q's address; the server still listens on every interface
 WEB_PORT = 8080
 WEB_MAX_SPEED = 0.57         # m/s, each wheel, manual driving (right wheel's 100% duty speed)
 WEB_CMD_TIMEOUT_S = 0.75     # coast if the page stops sending commands

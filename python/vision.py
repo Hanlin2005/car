@@ -2,7 +2,7 @@
 
 A background thread grabs frames, runs lane detection, draws the overlay and
 JPEG-encodes it for the web page. Lane following reads the latest result
-with latest(). Only one thing may open the webcam, so everything else goes
+with latest(). Only one thing may open the camera, so everything else goes
 through here.
 """
 
@@ -46,7 +46,7 @@ def _loop():
     from camera import Camera
     from lane_detector import LaneDetector
     camera = Camera()
-    if camera.cap is None:
+    if not camera.ok:
         return
     import cv2
     detector = LaneDetector()

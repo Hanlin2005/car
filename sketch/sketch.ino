@@ -3,7 +3,7 @@
 
 #include <Arduino_RouterBridge.h>
 #include <Wire.h>
-#include <VL53L0X.h>
+#include <VL53L1X.h>
 #include <BH1750.h>
 #include "pins.h"
 
@@ -15,7 +15,7 @@ static_assert(LIDAR_RX == 0, "lidar TX is wired to Serial1 RX");
 const bool MOTOR_TEST = false;
 
 // ---------- Settings ----------
-const float STOP_DISTANCE_M = 0.15;        // VL53L0X and lidar emergency stop distance
+const float STOP_DISTANCE_M = 0.15;        // VL53L1X and lidar emergency stop distance
 const float LIGHT_ON_LUX = 20;             // lamps on when darker than this
 const float LIGHT_OFF_LUX = 60;            // lamps off when brighter than this
 const unsigned long LIGHT_PERIOD_MS = 200; // BH1750 is read about 5 times a second
@@ -36,12 +36,12 @@ volatile long ticksLeft = 0, ticksRight = 0;
 unsigned long lastCmdMs = 0;
 bool estop = false;
 float frontM = 10;
-float tofM = -1;                           // VL53L0X meters, -1 if there is no reading
+float tofM = -1;                           // VL53L1X meters, -1 if there is no reading
 float lux = -1;                            // BH1750, -1 if there is no reading
 bool lightsOn = false;
 bool tofOk = false;
 bool lightOk = false;
-VL53L0X tof;
+VL53L1X tof;
 BH1750 lightMeter;
 String runMode = "idle";
 bool straightHoldEnabled = true;   // web page can turn encoder straightening off
@@ -199,9 +199,12 @@ int speedToPower(SpeedPI& pi, float kf, float target, float measured, float dt) 
   return (int)(ff + KP_SPEED * error + pi.integral);
 }
 
-// ========== VL53L0X, BH1750, and lamps ==========
+// ========== VL53L1X, BH1750, and lamps ==========
 // Both sensors share the header SDA/SCL bus (Wire). A failed distance read
 // is -1, which does not trip the stop. A failed light read leaves the lamps off.
+const uint8_t BH1750_ADDRESS = 0x23;
+const unsigned long TOF_STALE_MS = 200;    // no new VL53L1X sample this long = no reading
+unsigned long lastTofMs = 0;
 void writeLights(bool on) {
   lightsOn = on;
   digitalWrite(REAR_LIGHT_1, on ? HIGH : LOW);
@@ -216,32 +219,39 @@ void setupSensors() {
   writeLights(false);
 
   Wire.begin();
+  tof.setBus(&Wire);
   tof.setTimeout(500);
   tofOk = tof.init();
   if (!tofOk) {
-    Serial.println("VL53L0X not found on SDA/SCL");
+    Serial.println("VL53L1X not found on SDA/SCL");
   } else {
-    // One ranging period. A sample that is already ready returns immediately.
-    tof.setTimeout(20);
+    // Short mode reaches about 1.3 m, plenty for the stop distance, and allows
+    // the 20 ms minimum budget. The period must be at least the budget.
+    tof.setDistanceMode(VL53L1X::Short);
     tof.setMeasurementTimingBudget(20000);
-    tof.startContinuous(20);
+    tof.startContinuous(25);
   }
-  lightOk = lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE);
+  lightOk = lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, BH1750_ADDRESS, &Wire);
   if (!lightOk) Serial.println("BH1750 not found on SDA/SCL");
 }
 
+// Non-blocking: called every control tick (20 ms), keeps the last sample
+// until the next one is ready.
 float readTofFront() {
   if (!tofOk) {
     tofM = -1;
     return tofM;
   }
-  uint16_t mm = tof.readRangeContinuousMillimeters();
-  // 8190/8191 is out of range. A timeout returns 65535. Neither is an obstacle.
-  if (tof.timeoutOccurred() || mm >= 8190) {
+  if (tof.dataReady()) {
+    uint16_t mm = tof.read(false);
+    lastTofMs = millis();
+    // Out of range, low signal, and wrap-around come back as a non-valid
+    // status with a meaningless distance (often 0). None is an obstacle.
+    if (tof.ranging_data.range_status == VL53L1X::RangeValid) tofM = mm / 1000.0f;
+    else tofM = -1;
+  } else if (millis() - lastTofMs > TOF_STALE_MS) {
     tofM = -1;
-    return tofM;
   }
-  tofM = mm / 1000.0f;
   return tofM;
 }
 

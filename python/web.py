@@ -1,7 +1,7 @@
-"""The car's web page. Open http://car.local:8080 on your computer.
+"""The car's web page. Open http://10.194.91.71:8080 on your computer.
 
-Pick a mode, press Run, press Stop. Video is a stream of JPEGs from the USB
-webcam with the lane detection drawn on it. In manual driving, holding a
+Pick a mode, press Run, press Stop. Video is a stream of JPEGs from the
+Media Carrier camera with the lane detection drawn on it. In manual driving, holding a
 direction sends wheel speeds; letting go, or losing the page, stops the car.
 Self-driving modes stop if the page goes away (modes.py watchdog).
 """
@@ -77,8 +77,8 @@ _PAGE = r"""<!DOCTYPE html>
 <main>
   <h1>Car</h1>
   <div class="view">
-    <img id="video" src="/stream.mjpg" alt="Webcam">
-    <p id="novideo" class="novideo">No camera frame yet. Plug a USB webcam into the Uno Q.</p>
+    <img id="video" src="/stream.mjpg" alt="Camera">
+    <p id="novideo" class="novideo">No camera frame yet. Check the camera ribbon cable on the Media Carrier.</p>
   </div>
 
   <h2>Mode</h2>
@@ -534,7 +534,7 @@ def _front_m():
 
 
 def _tof_m():
-    """VL53L0X distance in meters, or None if the sensor has no reading."""
+    """VL53L1X distance in meters, or None if the sensor has no reading."""
     try:
         distance = float(hardware.sensors.get("tof_m"))
     except (TypeError, ValueError):
@@ -790,13 +790,14 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _urls(port):
-    found = [f"http://car.local:{port}"]
+    found = [f"http://{config.CAR_IP}:{port}", f"http://car.local:{port}"]
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.connect(("8.8.8.8", 80))
         ip = sock.getsockname()[0]
         sock.close()
-        if ip and not ip.startswith("127."):
+        if ip and not ip.startswith("127.") and ip != config.CAR_IP:
+            print(f"Note: the Uno Q is on {ip} now, not CAR_IP {config.CAR_IP}.", flush=True)
             found.append(f"http://{ip}:{port}")
     except OSError:
         pass

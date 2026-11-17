@@ -1,7 +1,7 @@
 # Autonomous Car (Arduino Uno Q)
 
 The microcontroller in `sketch/sketch.ino` drives the motors, reads the
-encoders, the lidar, the VL53L0X, and the BH1750. The Linux side runs the
+encoders, the lidar, the VL53L1X, and the BH1750. The Linux side runs the
 camera, the lane logic, and the page. Pin numbers live in `sketch/pins.h`.
 
 Open this folder in Arduino App Lab.
@@ -13,7 +13,7 @@ For now Motor1 is the right wheel and Motor2 is the left wheel. Swapping the
 left and right values in `pins.h` swaps which physical wheel is left.
 
 The Uno Q header is the classic Uno layout. D0 is the pin closest to the
-USB-C connector on the digital row. The VL53L0X and the BH1750 share the
+USB-C connector on the digital row. The VL53L1X and the BH1750 share the
 pins labeled SDA and SCL. A4 and A5 are a different I2C bus.
 
 | PCB | Uno Q |
@@ -50,7 +50,12 @@ The speed feed-forward in `sketch/sketch.ino` was measured on the old MDD3A
 driver. Run the duty-cycle test again with the DRV8833 and the battery you
 use, then update `KF_LEFT`, `KF_RIGHT`, and `WEB_MAX_SPEED`.
 
-A USB webcam goes in the Uno Q's USB port.
+The camera plugs into a MIPI-CSI connector on the UNO Media Carrier with
+the 22-pin ribbon cable. The code reads it through libcamera, so run
+`cam -l` on the Uno Q first: if it lists no camera, the code won't see one
+either. Set `CAMERA_FLIP` and `CAMERA_HFOV_DEG` in `python/config.py` for
+how the camera is mounted and which module it is. To go back to a USB
+webcam, set `CAMERA_SOURCE = "usb"`.
 
 If a wheel's distance goes negative while driving forward, set
 `INVERT_LEFT_ENCODER` or `INVERT_RIGHT_ENCODER` to `true` in
@@ -59,5 +64,6 @@ If a wheel's distance goes negative while driving forward, set
 ## Run
 
 In Arduino App Lab, open this folder and press Run. On a computer on the
-same network, open `http://<the-uno-q>:8080`. Manual driving is selected
+same network, open `http://10.194.91.71:8080` (`CAR_IP` in
+`python/config.py`). Manual driving is selected
 at startup and the wheels stay still until a direction is held.
