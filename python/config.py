@@ -54,7 +54,7 @@ ESTOP_DISTANCE_M = 0.15
 # "web" blocks forward itself when the front is too close, so reverse
 # still works. It is not in this list.
 ESTOP_MODES = ("drive", "straight_test")
-CMD_TIMEOUT_S = 0.30         # brake if wheel commands stop arriving
+CMD_TIMEOUT_S = 0.30         # coast if wheel commands stop arriving
 
 # --- Camera (USB webcam on the Uno Q) ---
 CAMERA_INDEX = 0             # /dev/video0
@@ -82,7 +82,7 @@ SHOW_LANES = True            # draw the detected lines on the camera video
 # Open http://car.local:8080 on a computer on the same network.
 WEB_PORT = 8080
 WEB_MAX_SPEED = 0.57         # m/s, each wheel, manual driving (right wheel's 100% duty speed)
-WEB_CMD_TIMEOUT_S = 0.75     # brake if the page stops sending commands
+WEB_CMD_TIMEOUT_S = 0.75     # coast if the page stops sending commands
 WEB_HEARTBEAT_S = 3.0        # self-driving modes stop if the page is gone this long
 KP_STRAIGHT_HOLD = 4.0       # m/s of wheel trim per meter the wheels differ, driving straight
 

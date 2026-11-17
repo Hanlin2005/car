@@ -1,4 +1,4 @@
-// Uno Q microcontroller: MDD3A motors, encoders, lidar, and the safety stop.
+// Uno Q microcontroller: DRV8833 motors, encoders, lidar, and the safety stop.
 // The Linux side (python/main.py) sends target wheel speeds over the Bridge.
 
 #include <Arduino_RouterBridge.h>
@@ -129,32 +129,61 @@ void setupMotors() {
   pinMode(RIGHT_IN1, OUTPUT); pinMode(RIGHT_IN2, OUTPUT);
 }
 
-// MDD3A: forward = PWM on input A, B low; backward = A low, PWM on B.
-// Both inputs low brakes the wheel. Both high also brakes, but one high
-// input with the other wire missing makes that wheel spin, so stop drives low.
+// DRV8833, one IN1/IN2 pair per wheel:
+//   IN1  IN2   result
+//   1    PWM'  forward, slow decay (brakes between pulses)
+//   PWM' 1     backward, slow decay
+//   PWM  0     forward, fast decay (coasts between pulses)
+//   0    PWM   backward, fast decay
+//   0    0     coast
+//   1    1     brake
+// PWM' is the inverted duty, 255 - power. Slow decay keeps speed close to
+// linear in duty, which the feed-forward below relies on.
+// The DRV8833 pulls a disconnected input low, so with one wire missing,
+// "brake" drives that wheel at full speed. Idle and timeouts coast; only the
+// emergency stop brakes.
+const bool SLOW_DECAY = true;
+
 void driveMotor(int in1, int in2, int power) {  // power: -255..255
   power = constrain(power, -255, 255);
-  if (power > 0) {
-    analogWrite(in1, power);
-    analogWrite(in2, 0);
-  } else if (power < 0) {
+  int duty = abs(power);
+  if (power == 0) {
     analogWrite(in1, 0);
-    analogWrite(in2, -power);
+    analogWrite(in2, 0);
+  } else if (SLOW_DECAY) {
+    if (power > 0) {
+      analogWrite(in1, 255);
+      analogWrite(in2, 255 - duty);
+    } else {
+      analogWrite(in1, 255 - duty);
+      analogWrite(in2, 255);
+    }
   } else {
-    analogWrite(in1, 0);
-    analogWrite(in2, 0);
+    if (power > 0) {
+      analogWrite(in1, duty);
+      analogWrite(in2, 0);
+    } else {
+      analogWrite(in1, 0);
+      analogWrite(in2, duty);
+    }
   }
 }
 
-void stopMotors() {
+void stopMotors() {  // coast
   analogWrite(LEFT_IN1, 0);  analogWrite(LEFT_IN2, 0);
   analogWrite(RIGHT_IN1, 0); analogWrite(RIGHT_IN2, 0);
+}
+
+void brakeMotors() {
+  analogWrite(LEFT_IN1, 255);  analogWrite(LEFT_IN2, 255);
+  analogWrite(RIGHT_IN1, 255); analogWrite(RIGHT_IN2, 255);
 }
 
 // ========== Speed control (feed-forward + PI, per wheel) ==========
 // Feed-forward from the duty-cycle benchmark (speed is close to linear in duty):
 //   left 100% -> 0.597 m/s, right 100% -> 0.571 m/s (right is ~4% slower)
-// Same units as METERS_PER_TICK: re-run the benchmark if you change it.
+// Measured on the MDD3A. Re-run python/dutycycletest.py on the DRV8833 and
+// whenever the battery or METERS_PER_TICK changes.
 const float KF_LEFT = 422.0;    // PWM per m/s
 const float KF_RIGHT = 441.0;
 const float PWM_OFFSET = 3.0;   // PWM needed just to start moving
@@ -385,10 +414,13 @@ void setup() {
 
 // ========== Motor test ==========
 // Runs each motor forward and backward, first at full power with plain
-// digitalWrite, then at 60% with analogWrite (PWM). Prints encoder ticks.
+// digitalWrite, then at 60% through driveMotor (PWM, same decay mode as
+// driving). Prints encoder ticks.
+// If nothing moves at full power, check the DRV8833's VM, GND, and nSLEEP.
 // If full power works but PWM doesn't, the pins don't support PWM.
 
-// Stop with the same method used to start, so PWM doesn't keep running
+// Both inputs low coasts on the DRV8833. Stop with the same method used to
+// start, so PWM doesn't keep running.
 void coastMotors(bool usePwm) {
   int pins[] = {LEFT_IN1, LEFT_IN2, RIGHT_IN1, RIGHT_IN2};
   for (int pin : pins) {
@@ -397,7 +429,7 @@ void coastMotors(bool usePwm) {
   }
 }
 
-void testStep(const char* label, int in1, int in2, int level1, int level2, bool usePwm) {
+void testStep(const char* label, int in1, int in2, int power, bool usePwm) {
   noInterrupts();
   ticksLeft = ticksRight = 0;
   interrupts();
@@ -405,13 +437,12 @@ void testStep(const char* label, int in1, int in2, int level1, int level2, bool 
   Serial.print("TEST: ");
   Serial.println(label);
   if (usePwm) {
-    analogWrite(in1, level1);
-    analogWrite(in2, level2);
+    driveMotor(in1, in2, power);
   } else {
     pinMode(in1, OUTPUT);  // take the pins back from PWM after a repeat
     pinMode(in2, OUTPUT);
-    digitalWrite(in1, level1 ? HIGH : LOW);
-    digitalWrite(in2, level2 ? HIGH : LOW);
+    digitalWrite(in1, power > 0 ? HIGH : LOW);
+    digitalWrite(in2, power < 0 ? HIGH : LOW);
   }
   delay(2000);
   coastMotors(usePwm);
@@ -426,15 +457,15 @@ void testStep(const char* label, int in1, int in2, int level1, int level2, bool 
 void motorTest() {
   const int PWM_60 = 153;  // 60% of 255
 
-  testStep("LEFT  forward  (full, digital)", LEFT_IN1, LEFT_IN2, 1, 0, false);
-  testStep("LEFT  backward (full, digital)", LEFT_IN1, LEFT_IN2, 0, 1, false);
-  testStep("RIGHT forward  (full, digital)", RIGHT_IN1, RIGHT_IN2, 1, 0, false);
-  testStep("RIGHT backward (full, digital)", RIGHT_IN1, RIGHT_IN2, 0, 1, false);
+  testStep("LEFT  forward  (full, digital)", LEFT_IN1, LEFT_IN2, 255, false);
+  testStep("LEFT  backward (full, digital)", LEFT_IN1, LEFT_IN2, -255, false);
+  testStep("RIGHT forward  (full, digital)", RIGHT_IN1, RIGHT_IN2, 255, false);
+  testStep("RIGHT backward (full, digital)", RIGHT_IN1, RIGHT_IN2, -255, false);
 
-  testStep("LEFT  forward  (60% PWM)", LEFT_IN1, LEFT_IN2, PWM_60, 0, true);
-  testStep("LEFT  backward (60% PWM)", LEFT_IN1, LEFT_IN2, 0, PWM_60, true);
-  testStep("RIGHT forward  (60% PWM)", RIGHT_IN1, RIGHT_IN2, PWM_60, 0, true);
-  testStep("RIGHT backward (60% PWM)", RIGHT_IN1, RIGHT_IN2, 0, PWM_60, true);
+  testStep("LEFT  forward  (60% PWM)", LEFT_IN1, LEFT_IN2, PWM_60, true);
+  testStep("LEFT  backward (60% PWM)", LEFT_IN1, LEFT_IN2, -PWM_60, true);
+  testStep("RIGHT forward  (60% PWM)", RIGHT_IN1, RIGHT_IN2, PWM_60, true);
+  testStep("RIGHT backward (60% PWM)", RIGHT_IN1, RIGHT_IN2, -PWM_60, true);
 
   Serial.println("TEST: done, repeating in 3 s");
   delay(3000);
@@ -465,7 +496,7 @@ void loop() {
     updateMeasuredSpeeds(dt);
 
     // Safety: stop on its own, no matter what Python says.
-    // Both inputs low is brake on the MDD3A.
+    // An obstacle brakes. Python going quiet coasts (see driveMotor).
     readTofFront();
     bool tofClose = tofM >= 0 && tofM < STOP_DISTANCE_M;
     bool wantEstop = runMode == "drive" || runMode == "straight_test";
@@ -473,7 +504,8 @@ void loop() {
     bool pythonSilent = lastCmdMs == 0 || (now - lastCmdMs) > timeout;
     estop = wantEstop && (tofClose || (front >= 0 && front < STOP_DISTANCE_M));
     if (estop || pythonSilent) {
-      stopMotors();
+      if (estop) brakeMotors();
+      else stopMotors();
       piLeft.integral = piRight.integral = 0;
       straightHoldOn = false;
     } else if (openLoop) {

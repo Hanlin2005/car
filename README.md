@@ -18,12 +18,12 @@ pins labeled SDA and SCL. A4 and A5 are a different I2C bus.
 
 | PCB | Uno Q |
 | --- | --- |
-| Motor1 forward | D9 (right wheel) |
-| Motor1 back | D10 |
+| Motor1 forward (DRV8833 BIN1) | D9 (right wheel) |
+| Motor1 back (DRV8833 BIN2) | D10 |
 | Motor1 encoder A | D4 |
 | Motor1 encoder B | D3 |
-| Motor2 forward | D6 (left wheel) |
-| Motor2 back | D5 |
+| Motor2 forward (DRV8833 AIN1) | D6 (left wheel) |
+| Motor2 back (DRV8833 AIN2) | D5 |
 | Motor2 encoder A | D11 |
 | Motor2 encoder B | D12 |
 | Rear light 1 | D7 |
@@ -39,6 +39,16 @@ current stays on the battery side, and the battery negative ties to Uno GND.
 
 Power the Uno Q from its USB-C supply. The motor battery only goes to the
 motor driver. Tie the battery negative to a Uno Q GND pin as well.
+
+The motor driver is a DRV8833. Its VM input takes 2.7 to 10.8 V, so a pack
+of 8 alkaline AA or AAA cells (about 12 V fresh) is too much; 6 cells or a
+2S Li-ion pack fits. nSLEEP (SLP or EEP on some boards) must be high or
+neither wheel turns. Tie it to 3.3V if the board doesn't pull it up. The
+left motor goes on AOUT1/AOUT2 and the right motor on BOUT1/BOUT2.
+
+The speed feed-forward in `sketch/sketch.ino` was measured on the old MDD3A
+driver. Run the duty-cycle test again with the DRV8833 and the battery you
+use, then update `KF_LEFT`, `KF_RIGHT`, and `WEB_MAX_SPEED`.
 
 A USB webcam goes in the Uno Q's USB port.
 

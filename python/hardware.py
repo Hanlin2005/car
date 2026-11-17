@@ -1,6 +1,6 @@
 """Link to the Uno Q microcontroller (sketch/sketch.ino) over the Bridge.
 
-The sketch drives the MDD3A, reads the encoders, and decodes the lidar.
+The sketch drives the DRV8833, reads the encoders, and decodes the lidar.
 This module keeps the same commands and telemetry the rest of the program
 already uses. Bridge calls happen from pump(), which main.py runs on the
 App thread, so the web page and the mode threads can request speeds safely.
