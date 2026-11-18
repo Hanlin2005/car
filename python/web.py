@@ -81,6 +81,16 @@ _PAGE = r"""<!DOCTYPE html>
     <p id="novideo" class="novideo">No camera frame yet. Check the camera ribbon cable on the Media Carrier.</p>
   </div>
 
+  <label class="check">
+    <input id="hue-enabled" type="checkbox" disabled>
+    Hue calibration
+  </label>
+  <label class="speed">Hue offset
+    <input id="hue-offset" type="range" min="-90" max="90" step="1" value="0" disabled>
+    <span id="hue-value">0°</span>
+  </label>
+  <p id="hue-status" class="note" role="status">Adjust while parked until the preview highlights both tapes.</p>
+
   <h2>Mode</h2>
   <div class="modes" id="modes"></div>
   <p id="help"></p>
@@ -91,6 +101,11 @@ _PAGE = r"""<!DOCTYPE html>
   <p id="state">Connecting…</p>
   <p id="detail"></p>
   <p id="sensors"></p>
+  <label class="check">
+    <input id="all-lights" type="checkbox" disabled>
+    Force all lights on
+  </label>
+  <p id="all-lights-error" class="bad" role="status" hidden></p>
 
   <label class="speed">Speed
     <input id="speed" type="range" min="0.05" max="0.57" step="0.01" value="0.30">
@@ -186,8 +201,16 @@ const visionGainLabel = document.getElementById("vision-gain-label");
 const rear1 = document.getElementById("rear1");
 const rear2 = document.getElementById("rear2");
 const head = document.getElementById("head");
+const allLights = document.getElementById("all-lights");
+const allLightsError = document.getElementById("all-lights-error");
+let savingAllLights = false;
 const link = document.getElementById("link");
 const novideo = document.getElementById("novideo");
+const hueEnabled = document.getElementById("hue-enabled");
+const hueOffset = document.getElementById("hue-offset");
+const hueValue = document.getElementById("hue-value");
+const hueStatus = document.getElementById("hue-status");
+let savedHue = null;
 const modesEl = document.getElementById("modes");
 const help = document.getElementById("help");
 const stateEl = document.getElementById("state");
@@ -380,6 +403,36 @@ function postVision() {
 vision.addEventListener("change", postVision);
 visionGain.addEventListener("input", postVision);
 
+function showHue(settings) {
+  savedHue = settings;
+  hueEnabled.checked = settings.enabled;
+  hueOffset.value = settings.offset;
+  hueEnabled.disabled = false;
+  hueOffset.disabled = !settings.enabled;
+  hueValue.textContent = (2 * Number(hueOffset.value)) + "°";
+}
+
+async function saveHue() {
+  hueEnabled.disabled = true;
+  hueOffset.disabled = true;
+  try {
+    const settings = await post("/hue-calibration", {
+      enabled: hueEnabled.checked, offset: Number(hueOffset.value)
+    });
+    if (settings.error) throw new Error(settings.error);
+    showHue(settings);
+    hueStatus.textContent = "Saved on the car.";
+  } catch (error) {
+    showHue(savedHue);
+    hueStatus.textContent = "Could not save hue calibration. " + error.message;
+  }
+}
+hueEnabled.addEventListener("change", saveHue);
+hueOffset.addEventListener("input", () => {
+  hueValue.textContent = (2 * Number(hueOffset.value)) + "°";
+});
+hueOffset.addEventListener("change", saveHue);
+
 function showLanes(data) {
   const left = running === "drive" && !!data.lane_left;
   const right = running === "drive" && !!data.lane_right;
@@ -402,6 +455,24 @@ function postLamps() {
 rear1.addEventListener("change", postLamps);
 rear2.addEventListener("change", postLamps);
 head.addEventListener("change", postLamps);
+
+allLights.addEventListener("change", async () => {
+  const enabled = allLights.checked;
+  savingAllLights = true;
+  allLights.disabled = true;
+  allLightsError.hidden = true;
+  try {
+    const data = await post("/all-lights", {enabled});
+    if (data.all_lights !== enabled) throw new Error("Light override failed");
+  } catch (err) {
+    allLights.checked = !enabled;
+    allLightsError.textContent = "Could not update the lights.";
+    allLightsError.hidden = false;
+  } finally {
+    savingAllLights = false;
+    allLights.disabled = false;
+  }
+});
 
 document.querySelectorAll("button[data-dir]").forEach((button) => {
   button.addEventListener("pointerdown", (event) => {
@@ -437,6 +508,7 @@ haltBtn.addEventListener("click", haltAll);
 window.addEventListener("keydown", (event) => {
   if (event.target === speed || event.target === correction || event.target === straightHold ||
       event.target === vision || event.target === visionGain ||
+      event.target === hueEnabled || event.target === hueOffset ||
       event.target === rear1 || event.target === rear2 || event.target === head) return;
   if (event.key === " " || event.key === "Escape") {
     event.preventDefault();
@@ -476,6 +548,11 @@ async function refresh() {
     novideo.classList.toggle("hidden", data.camera);
     apply(data);
     showSensors(data);
+    if (savedHue === null && data.hue_calibration) showHue(data.hue_calibration);
+    if (!savingAllLights && typeof data.all_lights === "boolean") {
+      allLights.checked = data.all_lights;
+      allLights.disabled = false;
+    }
     if (typeof data.straight_hold === "boolean" && data.straight_hold !== straightHold.checked) {
       post("/straight-hold", {enabled: straightHold.checked}).catch(() => {});
     }
@@ -573,7 +650,7 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = self.path.split("?", 1)[0]
         if path in ("/drive", "/status", "/stream.mjpg", "/mode", "/run", "/stop",
-                    "/straight-hold", "/vision", "/speed", "/lamps", "/lane-change"):
+                    "/straight-hold", "/vision", "/speed", "/lamps", "/all-lights", "/lane-change"):
             return
         super().log_message(fmt, *args)
 
@@ -644,10 +721,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._straight_hold()
             elif path == "/vision":
                 self._vision()
+            elif path == "/hue-calibration":
+                self._hue_calibration()
             elif path == "/speed":
                 self._speed()
             elif path == "/lamps":
                 self._lamps()
+            elif path == "/all-lights":
+                self._all_lights()
             elif path == "/lane-change":
                 self._lane_change()
             else:
@@ -711,6 +792,18 @@ class _Handler(BaseHTTPRequestHandler):
         config.SLOW_SPEED = speed / 2.0
         self._json(200, {"speed": config.CRUISE_SPEED})
 
+    def _all_lights(self):
+        try:
+            payload = self._body()
+            if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):
+                raise ValueError("enabled must be true or false")
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        enabled = payload["enabled"]
+        hardware.set_all_lights(enabled)
+        self._json(200, {"all_lights": enabled})
+
     def _lamps(self):
         if modes.status()["running"] != "light_test":
             self._json(409, {"error": "light test is not running"})
@@ -741,10 +834,24 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json(200, self._status(None))
 
+    def _hue_calibration(self):
+        try:
+            payload = self._body()
+            settings = vision.set_hue_calibration(payload.get("enabled"), payload.get("offset"))
+        except (ValueError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        except OSError as exc:
+            print(f"Could not save hue calibration: {exc}")
+            self._json(500, {"error": "The settings file could not be written."})
+            return
+        self._json(200, settings)
+
     def _status(self, since):
         out = modes.status()
         out.update({
             "camera": vision.camera_ok(),
+            "hue_calibration": vision.hue_calibration(),
             "left": _command["left"],
             "right": _command["right"],
             "blocked": _command["blocked"] or _front_blocked(),
@@ -753,6 +860,7 @@ class _Handler(BaseHTTPRequestHandler):
             "tof_m": hardware.sensors["tof_m"],
             "lux": hardware.sensors["lux"],
             "lights_on": bool(hardware.sensors["lights_on"]),
+            "all_lights": hardware.all_lights_enabled(),
             "straight_hold": car_link.straight_hold_enabled(),
             "vision": bool(config.VISION_CONTROL),
             "vision_gain": float(config.VISION_GAIN),

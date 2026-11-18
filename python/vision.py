@@ -6,8 +6,11 @@ with latest(). Only one thing may open the camera, so everything else goes
 through here.
 """
 
+import json
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import config
 
@@ -15,6 +18,54 @@ _lock = threading.Lock()
 _state = {"id": 0, "time": 0.0, "lane": None, "jpeg": None, "frame": None}
 _started = False
 _reset_track = False
+_calibration_lock = threading.Lock()
+_calibration_path = Path(__file__).resolve().parents[1] / "hue-calibration.json"
+
+
+def _validate_calibration(enabled, offset):
+    if type(enabled) is not bool or type(offset) is not int or not -90 <= offset <= 90:
+        raise ValueError("Expected a toggle and a hue offset from -90 to 90.")
+    return {"enabled": enabled, "offset": offset}
+
+
+def _load_calibration():
+    try:
+        saved = json.loads(_calibration_path.read_text(encoding="utf-8"))
+        return _validate_calibration(saved["enabled"], saved["offset"])
+    except FileNotFoundError:
+        pass
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"Could not load hue calibration: {exc}")
+    return {"enabled": False, "offset": 0}
+
+
+_calibration = _load_calibration()
+
+
+def hue_calibration():
+    with _calibration_lock:
+        return _calibration.copy()
+
+
+def set_hue_calibration(enabled, offset):
+    global _calibration
+    settings = _validate_calibration(enabled, offset)
+    with _calibration_lock:
+        if settings != _calibration:
+            temp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=_calibration_path.parent,
+                    prefix=".hue-calibration-", delete=False,
+                ) as stream:
+                    temp_path = Path(stream.name)
+                    json.dump(settings, stream)
+                temp_path.replace(_calibration_path)
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
+            _calibration = settings
+        return _calibration.copy()
 
 
 def reset_lane_track():
@@ -50,6 +101,7 @@ def _loop():
         return
     import cv2
     detector = LaneDetector()
+    previous_offset = 0
     while True:
         try:
             frame = camera.read()
@@ -59,9 +111,14 @@ def _loop():
             with _lock:
                 do_reset = _reset_track
                 _reset_track = False
-            if do_reset:
+            calibration = hue_calibration()
+            offset = calibration["offset"] if calibration["enabled"] else 0
+            if offset != previous_offset:
+                detector = LaneDetector()
+                previous_offset = offset
+            elif do_reset:
                 detector.reset_track()
-            lane = detector.detect(frame)
+            lane = detector.detect(frame, hue_offset=offset)
             shown = detector.draw(frame) if config.SHOW_LANES else frame
             ok, buf = cv2.imencode(".jpg", shown, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
             with _lock:

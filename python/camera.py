@@ -16,10 +16,11 @@ import config
 
 
 def _pipeline_caps():
-    # videoscale covers sensors that can't output FRAME_WIDTH x FRAME_HEIGHT directly.
+    # Scale before converting so videoconvert only touches the small frame.
+    sensor = f"width={config.CAMERA_SENSOR_WIDTH},height={config.CAMERA_SENSOR_HEIGHT}"
     size = f"width={config.FRAME_WIDTH},height={config.FRAME_HEIGHT}"
-    return (f"libcamerasrc ! video/x-raw,{size} ! videoconvert ! videoscale "
-            f"! video/x-raw,{size},format=BGR")
+    return (f"libcamerasrc ! video/x-raw,{sensor} ! videoscale "
+            f"! video/x-raw,{size} ! videoconvert ! video/x-raw,{size},format=BGR")
 
 
 class Camera:

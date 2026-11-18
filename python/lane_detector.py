@@ -65,7 +65,7 @@ class LaneDetector:
         self._prev_left = None
         self._prev_right = None
 
-    def detect(self, frame):
+    def detect(self, frame, hue_offset=0):
         """Return LaneInfo, or None if no lane is visible."""
         self.debug = None
         if frame is None or self._cv2 is None:
@@ -79,6 +79,8 @@ class LaneDetector:
         # Blur before converting: red's hue wraps from 179 to 0, so blurring
         # in HSV would average red pixels into a nonsense hue.
         hsv = cv2.cvtColor(cv2.GaussianBlur(roi, (5, 5), 0), cv2.COLOR_BGR2HSV)
+        if hue_offset:
+            hsv[:, :, 0] = (hsv[:, :, 0].astype(np.int16) + hue_offset) % 180
         left_mask = self._mask(hsv, config.LEFT_LINE_HSV_RANGES)     # yellow
         right_mask = self._mask(hsv, config.RIGHT_LINE_HSV_RANGES)   # red
 

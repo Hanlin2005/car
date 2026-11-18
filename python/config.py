@@ -61,7 +61,13 @@ CAMERA_SOURCE = "csi"        # "csi" = Media Carrier camera via libcamera, "usb"
 CAMERA_INDEX = 0             # /dev/video0, only used when CAMERA_SOURCE = "usb"
 # "none" | "180" | "horizontal" | "vertical". Use "180" if the ribbon cable
 # forces the camera to be mounted upside down. Lanes must look right on the page.
-CAMERA_FLIP = "none"
+CAMERA_FLIP = "180"
+# Size asked of libcamera before scaling down to FRAME_WIDTH x FRAME_HEIGHT.
+# 816x612 makes libcamera read the IMX219's full-view 1640x1232 mode; smaller
+# requests pick the 640x480 mode, which crops the middle (zoomed in). Larger
+# outputs (1632x1224 and up) run out of the board's 32 MB of camera memory.
+CAMERA_SENSOR_WIDTH = 816
+CAMERA_SENSOR_HEIGHT = 612
 FRAME_WIDTH = 320
 FRAME_HEIGHT = 240
 

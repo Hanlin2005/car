@@ -39,6 +39,8 @@ float frontM = 10;
 float tofM = -1;                           // VL53L1X meters, -1 if there is no reading
 float lux = -1;                            // BH1750, -1 if there is no reading
 bool lightsOn = false;
+bool forceLightsOn = false;
+bool automaticLightsOn = false;
 bool tofOk = false;
 bool lightOk = false;
 VL53L1X tof;
@@ -256,22 +258,14 @@ float readTofFront() {
 }
 
 void updateLights() {
-  if (!lightOk) {
-    lux = -1;
-    if (runMode != "light_test") writeLights(false);
-    return;
-  }
-  float reading = lightMeter.readLightLevel();
-  if (reading < 0 || reading != reading) {
-    lux = -1;
-    if (runMode != "light_test") writeLights(false);
-    return;
-  }
-  lux = reading;
+  float reading = lightOk ? lightMeter.readLightLevel() : -1;
+  lux = reading >= 0 ? reading : -1;
   // Light test drives the pins itself. Keep reading lux for the log.
   if (runMode == "light_test") return;
-  if (!lightsOn && lux < LIGHT_ON_LUX) writeLights(true);
-  else if (lightsOn && lux > LIGHT_OFF_LUX) writeLights(false);
+  if (lux < 0 || lux > LIGHT_OFF_LUX) automaticLightsOn = false;
+  else if (lux < LIGHT_ON_LUX) automaticLightsOn = true;
+  bool on = forceLightsOn || automaticLightsOn;
+  if (lightsOn != on) writeLights(on);
 }
 
 // ========== Bridge handlers (Python -> MCU) ==========
@@ -299,13 +293,22 @@ void stop_car() {
 }
 
 void set_mode(String mode) {
-  if (runMode == "light_test" && mode != "light_test") writeLights(false);
+  if (runMode == "light_test" && mode != "light_test") {
+    automaticLightsOn = false;
+    writeLights(forceLightsOn);
+  }
   runMode = mode;
+}
+
+void set_all_lights(bool enabled) {
+  if (forceLightsOn == enabled) return;
+  forceLightsOn = enabled;
+  if (enabled || runMode != "light_test") writeLights(enabled || automaticLightsOn);
 }
 
 // Light test only. Each argument turns that lamp on or off.
 void set_lamps(bool rear1, bool rear2, bool head) {
-  if (runMode != "light_test") return;
+  if (runMode != "light_test" || forceLightsOn) return;
   digitalWrite(REAR_LIGHT_1, rear1 ? HIGH : LOW);
   digitalWrite(REAR_LIGHT_2, rear2 ? HIGH : LOW);
   digitalWrite(HEADLIGHTS, head ? HIGH : LOW);
@@ -416,6 +419,7 @@ void setup() {
   Bridge.provide("set_mode", set_mode);
   Bridge.provide("set_straight_hold", set_straight_hold);
   Bridge.provide("set_lamps", set_lamps);
+  Bridge.provide("set_all_lights", set_all_lights);
 
   setupMotors();
   setupEncoders();

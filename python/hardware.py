@@ -49,6 +49,7 @@ _pending = {
     "right": 0.0,
     "mode": "idle",
     "straight_hold": True,   # encoder-difference straightening, web page toggle
+    "all_lights": False,
     "rear1": False,
     "rear2": False,
     "head": False,
@@ -130,11 +131,13 @@ def pump():
         right = _pending["right"]
         mode = _pending["mode"]
         straight_hold = _pending["straight_hold"]
+        all_lights = _pending["all_lights"]
         rear1 = _pending["rear1"]
         rear2 = _pending["rear2"]
         head = _pending["head"]
     _Bridge.notify("set_mode", mode)
     _Bridge.notify("set_straight_hold", bool(straight_hold))
+    _Bridge.notify("set_all_lights", all_lights)
     _Bridge.notify("set_lamps", bool(rear1), bool(rear2), bool(head))
     if kind == "speed":
         _Bridge.notify("set_wheel_speeds", float(left), float(right))
@@ -160,6 +163,16 @@ def set_lamps(rear1, rear2, head):
         _pending["rear1"] = bool(rear1)
         _pending["rear2"] = bool(rear2)
         _pending["head"] = bool(head)
+
+
+def set_all_lights(enabled):
+    with _lock:
+        _pending["all_lights"] = enabled
+
+
+def all_lights_enabled():
+    with _lock:
+        return _pending["all_lights"]
 
 
 def lamp_state():

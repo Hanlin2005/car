@@ -9,12 +9,12 @@ const int LEFT_ENC_A = 11;             // encoder A, the tick
 const int LEFT_ENC_B = 12;             // encoder B, the direction
 const bool INVERT_LEFT_ENCODER = false;
 
-// Motor1, right wheel, DRV8833 channel B. Forward is pin 9, back is pin 10.
-const int RIGHT_IN1 = 9;               // DRV8833 BIN1
-const int RIGHT_IN2 = 10;              // DRV8833 BIN2
+// Motor1, right wheel, DRV8833 channel B. Forward is pin 10, back is pin 9.
+const int RIGHT_IN1 = 10;              // DRV8833 BIN2
+const int RIGHT_IN2 = 9;               // DRV8833 BIN1
 const int RIGHT_ENC_A = 4;
 const int RIGHT_ENC_B = 3;
-const bool INVERT_RIGHT_ENCODER = false;
+const bool INVERT_RIGHT_ENCODER = true; // match the reversed right motor direction
 
 // All three follow the light sensor. Headlights are both lamps on one pin.
 const int REAR_LIGHT_1 = 7;
