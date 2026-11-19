@@ -3,3 +3,5 @@
 runs/
 hue-calibration.json
 .hue-calibration-*
+__pycache__/
+*.pyc
