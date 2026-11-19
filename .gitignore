@@ -1,3 +1,5 @@
 # ignore app cache folder
 .cache/
 runs/
+hue-calibration.json
+.hue-calibration-*

@@ -115,8 +115,9 @@ def start():
     Bridge.provide("sensors", _on_sensors)
     with _lock:
         _pending["mode"] = config.MODE if config.MODE in (
-            "web", "drive", "straight_test", "duty_test", "motor_test", "lidar_test",
-            "light_test", "sensor_test", "motor1_test", "motor2_test",
+            "web", "drive", "heading_align", "turn_test", "straight_test", "duty_test",
+            "motor_test", "lidar_test", "light_test", "sensor_test",
+            "motor1_test", "motor2_test",
         ) else "idle"
     _started = True
     print("Uno Q: waiting for the microcontroller (pin numbers are in sketch/pins.h).")

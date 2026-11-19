@@ -6,6 +6,10 @@ width off the lane the car is leaving. Relock starts when the measured
 center jumps onto the new pair: the target goes back to 0 and the follower
 is told to drop its smoothed offset. Once the new lane stays centered, the
 car follows it and keeps the new lane index.
+
+The lane index also follows the camera: when both boundaries of the lane
+are seen, their colors say which lane it is (see lane_detector), and that
+overrides the count kept here.
 """
 
 import time
@@ -53,6 +57,10 @@ class Planner:
         """Return (state, target_speed, target_offset) for the controller."""
         now = time.monotonic()
         self.relock = False
+        if (lane is not None and lane.lane_confirmed
+                and self.state != CHANGE_LANE
+                and 0 <= lane.lane_index < config.LANE_COUNT):
+            self.lane_index = lane.lane_index
         self._set_available(lane, obstacles)
 
         if self._hold:
@@ -100,10 +108,17 @@ class Planner:
         self.right_available = False
         if lane is None or self._hold or self.state == CHANGE_LANE:
             return
-        if (self.lane_index - 1 >= 0 and lane.neighbor_left
+        # The course is known (LANE_COUNT lanes), so once the camera has
+        # confirmed which lane this is, the neighbors exist whether or not
+        # their far line is in view. From the middle lane the reds are
+        # outside the camera's field of view, so requiring them never offered
+        # a change. Seeing the far line still counts when the lane is not
+        # confirmed (one line only).
+        known = getattr(lane, "lane_confirmed", False)
+        if (self.lane_index - 1 >= 0 and (known or lane.neighbor_left)
                 and obstacles.left > config.SIDE_CLEAR_DISTANCE):
             self.left_available = True
-        if (self.lane_index + 1 < config.LANE_COUNT and lane.neighbor_right
+        if (self.lane_index + 1 < config.LANE_COUNT and (known or lane.neighbor_right)
                 and obstacles.right > config.SIDE_CLEAR_DISTANCE):
             self.right_available = True
 
@@ -125,6 +140,13 @@ class Planner:
         self.left_available = False
         self.right_available = False
 
+    @staticmethod
+    def _change_speed(obstacles):
+        """Speed during a lane change: near cruise, unless something is close ahead."""
+        if obstacles.front < config.SLOW_DISTANCE:
+            return config.SLOW_SPEED
+        return max(config.SLOW_SPEED, config.LANE_CHANGE_SPEED_FRAC * config.CRUISE_SPEED)
+
     def _changing(self, lane, obstacles, now):
         direction = self.change_direction
         sign = -1.0 if direction == "left" else 1.0
@@ -141,13 +163,14 @@ class Planner:
                     self._settle_since = None
                     self.relock = True
                     self._last_offset = lane.offset
-                    return self.state, config.SLOW_SPEED, 0.0
+                    return self.state, self._change_speed(obstacles), 0.0
             side = obstacles.left if direction == "left" else obstacles.right
             if side <= config.SIDE_CLEAR_DISTANCE:
                 return self._cancel(lane, obstacles)
             if lane is not None:
                 self._last_offset = lane.offset
-            return self.state, config.SLOW_SPEED, sign * config.LANE_WIDTH_M
+            ramp = min(1.0, (now - self._phase_t0) / max(config.LANE_CHANGE_RAMP_S, 1e-3))
+            return self.state, self._change_speed(obstacles), sign * config.LANE_WIDTH_M * ramp
 
         if (lane is not None
                 and abs(lane.offset) < config.LANE_CHANGE_DONE_M
@@ -162,7 +185,7 @@ class Planner:
                 return self._resume(lane, obstacles)
         else:
             self._settle_since = None
-        return self.state, config.SLOW_SPEED, 0.0
+        return self.state, self._change_speed(obstacles), 0.0
 
     def _cancel(self, lane, obstacles):
         """The destination closed up. Stay in this lane."""

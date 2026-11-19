@@ -66,6 +66,9 @@ class LaneFollower:
         # Last camera values (for the log / overlay text).
         self._offset = None
         self._heading = None
+        # Filtered rate of change of the fused heading, for damping.
+        self._prev_theta = None
+        self._theta_rate = 0.0
 
     def update(self, lane, speed, target_offset, telemetry=None, now=None, relock=False):
         """Return (left, right) wheel speeds in m/s.
@@ -135,6 +138,15 @@ class LaneFollower:
         self.lane_lost = cam_age > config.LANE_LOST_TIMEOUT_S
         target_omega = _pure_pursuit_omega(
             self.pose.x, self.pose.theta, target_offset, speed)
+        # Damping: oppose the heading's rate of change. theta + is nose right;
+        # omega + turns left (theta down). A swing to the right (rate > 0)
+        # gets a left turn added, which also softens the controller's own turns.
+        if self._prev_theta is not None:
+            raw_rate = (self.pose.theta - self._prev_theta) / dt
+            a = config.HEADING_RATE_FILTER
+            self._theta_rate = (1.0 - a) * self._theta_rate + a * raw_rate
+            target_omega += config.HEADING_DAMPING * self._theta_rate
+        self._prev_theta = self.pose.theta
         target_omega = _clamp(target_omega, config.MAX_OMEGA)
         step = config.MAX_OMEGA_RATE * dt
         self._omega += _clamp(target_omega - self._omega, step)

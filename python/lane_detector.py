@@ -1,17 +1,23 @@
 """Camera frame -> where the car is in its lane. Uses the camera only.
 
-The left lane line is red tape and the right lane line is yellow tape. Each
-color is picked out in HSV, a straight line is fitted to each one in the
-bottom part of the image, and the lane center is the midpoint between them.
+Three lanes on the course:
 
-A second line of the same color is a neighboring lane, not part of this one.
-The fit keeps the pair followed on the previous frame. The other lines are
-reported as a lane on the left or the right.
+  RED |-- lane 0 --| YELLOW |-- lane 1 --| YELLOW |-- lane 2 --| RED
+
+Lane 0 is red on the left and yellow on the right. Lane 1 is yellow on both
+sides. Lane 2 is yellow on the left and red on the right. So the colors of
+the pair being followed say which lane the car is in. Each color is picked
+out in HSV, straight lines are fitted in the bottom of the image, and the
+lane center is the midpoint of the pair being followed.
+
+The fit keeps the pair from the previous frame. When that pair drifts far
+off-center (lane change), it re-locks onto the pair nearest the image center.
 """
 
 import math
 from dataclasses import dataclass
 
+import birdseye
 import config
 
 
@@ -19,10 +25,15 @@ import config
 class LaneInfo:
     offset: float    # meters from lane center (+ = car is right of center)
     heading: float   # radians between car and lane direction (+ = pointing right)
-    left_lane_exists: bool    # the red (left) line was seen this frame
-    right_lane_exists: bool   # the yellow (right) line was seen this frame
+    left_lane_exists: bool    # left boundary of this lane was seen this frame
+    right_lane_exists: bool   # right boundary of this lane was seen this frame
     neighbor_left: bool       # a full lane is visible on the left
     neighbor_right: bool      # a full lane is visible on the right
+    lane_index: int           # 0 red|yellow, 1 yellow|yellow, 2 yellow|red
+    lane_confirmed: bool      # at least two lines agree on the lane (or both
+                              # boundaries seen), not carried over
+    lane_pos: float = None    # car's sideways position in lane widths from
+                              # the left red line (0..3), from the floor fit
 
 
 @dataclass
@@ -57,6 +68,15 @@ class LaneDetector:
         # stays a neighbor instead of pulling the fit sideways.
         self._prev_left = None
         self._prev_right = None
+        # Which lane the followed pair belongs to, by its colors:
+        # 0 = red|yellow, 1 = yellow|yellow, 2 = yellow|red.
+        self._lane = config.START_LANE
+        # Sideways position in lane widths from the left red line, from the
+        # floor fit. Used to keep the lane steady between frames.
+        self._pos = config.START_LANE + 0.5
+        # Frames in a row where lines were seen but the floor fit failed.
+        # Many in a row means the learned width is wrong: forget it.
+        self._floor_misses = 0
         # The last frame's results, for drawing on the web page.
         self.debug = None
 
@@ -71,9 +91,23 @@ class LaneDetector:
         return self._lane_px
 
     def reset_track(self):
-        """Forget which lines were followed, and lock onto the lane ahead."""
+        """Forget which lines were followed, and lock onto the lane ahead.
+
+        Also forgets the learned lane width and horizon: a run that spun or
+        crossed the lines at an angle may have taught it nonsense.
+        """
         self._prev_left = None
         self._prev_right = None
+        self._lane = config.START_LANE
+        self._pos = config.START_LANE + 0.5
+        self._lane_px = None
+        self._horizon = None
+        self._floor_misses = 0
+
+    @property
+    def lane_index(self):
+        """Lane the detector believes it is following (0, 1 or 2)."""
+        return self._lane
 
     def detect(self, frame, hue_offset=0):
         """Return LaneInfo, or None if no lane is visible."""
@@ -91,45 +125,76 @@ class LaneDetector:
         hsv = cv2.cvtColor(cv2.GaussianBlur(roi, (5, 5), 0), cv2.COLOR_BGR2HSV)
         if hue_offset:
             hsv[:, :, 0] = (hsv[:, :, 0].astype(np.int16) + hue_offset) % 180
-        left_mask = self._mask(hsv, config.LEFT_LINE_HSV_RANGES)     # red
-        right_mask = self._mask(hsv, config.RIGHT_LINE_HSV_RANGES)   # yellow
+        red_mask = self._mask(hsv, config.LEFT_LINE_HSV_RANGES)      # red
+        yellow_mask = self._mask(hsv, config.RIGHT_LINE_HSV_RANGES)  # yellow
 
-        lefts = self._fit_lines(left_mask, roi_top, w)
-        rights = self._fit_lines(right_mask, roi_top, w)
+        reds = self._fit_lines(red_mask, roi_top, w)
+        yellows = self._fit_lines(yellow_mask, roi_top, w)
 
         y_bot = h - 1
-        left, right = self._choose_pair(lefts, rights, y_bot, w)
+        left, right, lane_kind = self._choose_pair(reds, yellows, y_bot, w)
+        confirmed = left is not None and right is not None
         if left is None and right is None:
-            # One color only: keep the line nearest the one followed last frame.
-            left = self._nearest(lefts, self._prev_left, y_bot, w)
-            right = self._nearest(rights, self._prev_right, y_bot, w)
-        # Red has to be on the left of yellow. If it isn't, something else
-        # red or yellow is in view, so trust neither line.
+            left, right, lane_kind = self._fallback_lines(
+                reds, yellows, y_bot, w)
         if left and right and left.x_at(y_bot) >= right.x_at(y_bot):
             left = right = None
-        left_extra = [line for line in lefts if line is not left]
-        right_extra = [line for line in rights if line is not right]
+            confirmed = False
+
+        # On the floor, the lines' sideways distances from the car say which
+        # lane it is in whatever way the car is pointing. The image-row pair
+        # above is only a fallback for when the floor mapping is unusable.
+        floor = self._floor_lines(reds, yellows, w, h, roi_top)
+        located = self._locate(floor) if floor else None
+        pos = None
+        if located is not None:
+            left, right, lane_kind, pos, confirmed, slots = located
+            straight = all(abs(phi) < 0.2 for _l, _c, _u, phi in floor)
+            self._floor_misses = 0
+        else:
+            # No floor fit. Judge "pointing along the lines" from the image:
+            # a straight-on pair is left/right symmetric about the center.
+            straight = (left is not None and right is not None and
+                        abs(left.slope + right.slope) < 0.3 * abs(left.slope - right.slope))
+            if len(reds) + len(yellows) >= 2 and self._lane_px is not None:
+                self._floor_misses += 1
+                if self._floor_misses > 30:
+                    # Two or more lines in view that the floor model cannot
+                    # place, for a second: the learned width is wrong.
+                    # Start learning again.
+                    self._lane_px = None
+                    self._horizon = None
+                    self._floor_misses = 0
 
         self.debug = {"roi_top": roi_top, "left": left, "right": right,
-                      "left_extra": left_extra, "right_extra": right_extra,
-                      "left_mask": left_mask, "right_mask": right_mask, "info": None}
+                      "lane": lane_kind, "confirmed": confirmed, "pos": pos,
+                      "left_extra": [line for line in reds if line is not left],
+                      "right_extra": [line for line in yellows
+                                      if line is not left and line is not right],
+                      "left_mask": red_mask, "right_mask": yellow_mask,
+                      "info": None}
         if left is None and right is None:
             return None
 
-        # Lane width in pixels at the bottom row.
-        if left and right:
+        # Lane width in pixels at the bottom row. Only meaningful when the
+        # car points along the lines; at an angle the row cuts them obliquely.
+        if left and right and straight:
             width = right.x_at(y_bot) - left.x_at(y_bot)
             if width > config.LANE_MIN_WIDTH_FRAC * w:
                 self._lane_px = width if self._lane_px is None else \
                     0.8 * self._lane_px + 0.2 * width
         lane_px = self._lane_px or config.LANE_DEFAULT_WIDTH_FRAC * w
-        # Measure a neighbor against this pair's own width, not a full-frame guess.
         if left is not None and right is not None:
             pair_px = right.x_at(y_bot) - left.x_at(y_bot)
         else:
             pair_px = lane_px
-        neighbor_left, neighbor_right = self._neighbors(
-            left, right, left_extra, right_extra, y_bot, pair_px)
+        if located is not None:
+            # A neighbor lane is in view when its far boundary was placed.
+            neighbor_left = (lane_kind - 1) in slots
+            neighbor_right = (lane_kind + 2) in slots
+        else:
+            neighbor_left, neighbor_right = self._neighbors(
+                left, right, reds, yellows, y_bot, pair_px, lane_kind)
 
         # Vanishing point: where the two lane lines meet in the distance.
         # Perspective makes being off-center TILT the lane in the image, but
@@ -162,14 +227,137 @@ class LaneDetector:
             self._prev_left = left
         if right is not None:
             self._prev_right = right
+        if confirmed or located is not None:
+            # The floor fit decides the lane (its hysteresis stops flip-flop
+            # on a line). Updating only on two-line confirmation left the
+            # one-line fallback answering with the OLD lane after a change,
+            # so the offset alternated between two lanes' values.
+            self._lane = lane_kind
+        if pos is not None:
+            self._pos = pos
         info = LaneInfo(offset=offset, heading=heading,
                         left_lane_exists=left is not None,
                         right_lane_exists=right is not None,
                         neighbor_left=neighbor_left,
-                        neighbor_right=neighbor_right)
+                        neighbor_right=neighbor_right,
+                        lane_index=lane_kind,
+                        lane_confirmed=confirmed,
+                        lane_pos=pos)
         self.debug.update({"center_bot": cx_bot, "center_look": cx_look,
                            "y_look": roi_top, "x_vp": x_vp, "info": info})
         return info
+
+    # ---- Floor-based lane localization --------------------------------
+
+    def _floor_lines(self, reds, yellows, w, h, roi_top):
+        """Each fitted line as (line, color, u, phi) on the floor.
+
+        u is the line's sideways distance from the car in lane widths
+        (+ = right), measured perpendicular to the line, so it does not
+        change with the car's heading. phi is the line's direction relative
+        to the car (+ = it runs off to the right). None if the camera pose
+        is unusable (horizon too low) or no line maps to the floor.
+        """
+        horizon = self._horizon if self._horizon is not None else config.LANE_HORIZON_FRAC * h
+        lane_px = self._lane_px or config.LANE_DEFAULT_WIDTH_FRAC * w
+        pose = birdseye.camera_pose(w, h, horizon, lane_px)
+        if pose is None:
+            return None
+        y_bot = h - 1
+        # Second sample well below the horizon, where the mapping is stable.
+        y_far = max(roi_top + 0.2 * (y_bot - roi_top), horizon + 0.12 * (y_bot - horizon))
+        out = []
+        for lines, color in ((reds, "red"), (yellows, "yellow")):
+            for line in lines:
+                near = self._to_floor(line.x_at(y_bot), y_bot, w, h, pose)
+                far = self._to_floor(line.x_at(y_far), y_far, w, h, pose)
+                if near is None or far is None:
+                    continue
+                dx, dz = far[0] - near[0], far[1] - near[1]
+                norm = math.hypot(dx, dz)
+                if norm < 1e-6:
+                    continue
+                dx, dz = dx / norm, dz / norm
+                if dz < 0:
+                    dx, dz = -dx, -dz
+                # Signed perpendicular distance from the reference point
+                # (the camera, or LANE_REF_BEHIND_CAMERA_M behind it).
+                d = near[0] * dz - near[1] * dx
+                d -= config.LANE_REF_BEHIND_CAMERA_M * dx
+                out.append((line, color, d / config.LANE_WIDTH_M, math.atan2(dx, dz)))
+        return out or None
+
+    @staticmethod
+    def _to_floor(u, v, w, h, pose):
+        """Image pixel -> floor point (meters right, meters ahead of the camera)."""
+        focal, tilt, cam_h = pose
+        a = (u - w / 2) / focal
+        b = (v - h / 2) / focal
+        s, c = math.sin(tilt), math.cos(tilt)
+        down = b * c + s          # ray's downward component per unit forward
+        if down <= 1e-3:
+            return None           # at or above the horizon
+        k = cam_h / down
+        return a * k, (c - b * s) * k
+
+    _SLOTS = {"red": (0, 3), "yellow": (1, 2)}   # tape index from the left red
+
+    def _locate(self, floor):
+        """Fit the floor lines to RED|YEL|YEL|RED.
+
+        Tape k sits at k lane widths from the left red. A line of color c at
+        sideways distance u puts the car at p = k - u for each slot k of that
+        color. The p with the most agreeing lines wins; ties go to the p
+        closest to last frame's. Returns (left, right, lane, p, confirmed,
+        slots) or None.
+        """
+        tol = config.LANE_LOCATE_TOL
+        count = config.LANE_COUNT
+        candidates = []
+        for line, color, u, _phi in floor:
+            for k in self._SLOTS[color]:
+                p = k - u
+                if -0.5 <= p <= count + 0.5:
+                    candidates.append(p)
+        if not candidates:
+            return None
+
+        best = None
+        for p0 in candidates:
+            slots = {}
+            for line, color, u, phi in floor:
+                k = min(self._SLOTS[color], key=lambda kk: abs(kk - u - p0))
+                err = abs(k - u - p0)
+                if err <= tol and (k not in slots or slots[k][1] > err):
+                    slots[k] = (line, err, u)
+            if not slots:
+                continue
+            p = sum(k - u for k, (_l, _e, u) in slots.items()) / len(slots)
+            # Most lines agreeing wins; then a position on the course beats
+            # one beside it (a lone red could be either edge); then the
+            # position nearest last frame's; then the tightest fit.
+            on_course = -0.15 <= p <= count + 0.15
+            score = (len(slots), on_course, -abs(p - self._pos),
+                     -sum(e for _l, e, _u in slots.values()))
+            if best is None or score > best[0]:
+                best = (score, p, slots)
+        if best is None:
+            return None
+        _score, p, slots = best
+        lane = int(min(count - 1, max(0, math.floor(p))))
+        # Hysteresis: stay in the last lane until the car is clearly past
+        # its line, so the answer does not flip-flop while crossing.
+        hyst = config.LANE_SWITCH_HYST
+        prev = self._lane
+        if lane != prev and (prev - hyst) <= p <= (prev + 1 + hyst):
+            lane = prev
+        placed = {k: v[0] for k, v in slots.items()}
+        left = placed.get(lane)
+        right = placed.get(lane + 1)
+        if left is None and right is None:
+            return None       # placed only a far line: no boundary to follow
+        confirmed = len(placed) >= 2
+        return left, right, lane, p, confirmed, placed
 
     @staticmethod
     def _focal_px(width):
@@ -258,56 +446,108 @@ class LaneDetector:
                 out.append((y, float(np.median(group))))
         return out
 
-    def _choose_pair(self, lefts, rights, y_bot, width):
-        """The red/yellow pair of the lane being followed.
-
-        A pair has to be about one lane wide, with no other tape between
-        the red and the yellow. Among those, stay on the pair nearest the
-        one followed last frame.
-        With no history, take the pair centered closest to the image center.
-        """
-        if not lefts or not rights:
-            return None, None
+    def _width_bounds(self, width):
         if self._lane_px is None:
-            lo = config.LANE_MIN_WIDTH_FRAC * width
-            hi = 0.95 * width
-        else:
-            lo = 0.5 * self._lane_px
-            hi = 1.6 * self._lane_px
-        pairs = []
-        for left_line in lefts:
-            for right_line in rights:
-                gap = right_line.x_at(y_bot) - left_line.x_at(y_bot)
+            return config.LANE_MIN_WIDTH_FRAC * width, 0.95 * width
+        return 0.5 * self._lane_px, 1.6 * self._lane_px
+
+    def _choose_pair(self, reds, yellows, y_bot, width):
+        """Pick the lane pair being followed.
+
+        Lane 0: red left + yellow right. Lane 1: yellow + yellow.
+        Lane 2: yellow left + red right. A pair has to be about one lane
+        wide with no other tape between.
+        """
+        lo, hi = self._width_bounds(width)
+        all_lines = list(reds) + list(yellows)
+        pairs = []  # (left, right, lane_index)
+
+        for red in reds:
+            for yel in yellows:
+                gap = yel.x_at(y_bot) - red.x_at(y_bot)
+                if gap >= 0:
+                    kind = 0           # red on the left
+                else:
+                    gap = -gap
+                    kind = 2           # red on the right
+                left_line, right_line = (red, yel) if kind == 0 else (yel, red)
                 if lo <= gap <= hi and not self._pair_blocked(
-                        left_line, right_line, lefts, rights, y_bot):
-                    pairs.append((left_line, right_line, gap))
+                        left_line, right_line, all_lines, y_bot):
+                    pairs.append((left_line, right_line, kind))
+
+        for i, a in enumerate(yellows):
+            for b in yellows[i + 1:]:
+                y_left, y_right = ((a, b) if a.x_at(y_bot) <= b.x_at(y_bot)
+                                   else (b, a))
+                gap = y_right.x_at(y_bot) - y_left.x_at(y_bot)
+                if lo <= gap <= hi and not self._pair_blocked(
+                        y_left, y_right, all_lines, y_bot):
+                    pairs.append((y_left, y_right, 1))
+
         if not pairs:
-            return None, None
+            return None, None, self._lane
+
+        def center_dist(pair):
+            left_line, right_line, _ = pair
+            mid = (left_line.x_at(y_bot) + right_line.x_at(y_bot)) / 2.0
+            return abs(mid - width / 2.0)
+
+        lane_px = self._lane_px if self._lane_px is not None else 0.45 * width
         if self._prev_left is not None and self._prev_right is not None:
-            def rank(pair):
-                left_line, right_line, _gap = pair
-                return (abs(left_line.x_at(y_bot) - self._prev_left.x_at(y_bot))
-                        + abs(right_line.x_at(y_bot) - self._prev_right.x_at(y_bot)))
+            prev_mid = (self._prev_left.x_at(y_bot) + self._prev_right.x_at(y_bot)) / 2.0
+            # During a lane change the old pair drifts off-center. Once the
+            # car is past that lane's edge tape (more than half a lane from
+            # its center), re-lock onto whichever valid pair is nearest the
+            # image center, so a change through the middle lane sees it.
+            if abs(prev_mid - width / 2.0) > 0.6 * lane_px:
+                left_line, right_line, lane_kind = min(pairs, key=center_dist)
+            else:
+                def rank(pair):
+                    left_line, right_line, _ = pair
+                    return (abs(left_line.x_at(y_bot) - self._prev_left.x_at(y_bot))
+                            + abs(right_line.x_at(y_bot) - self._prev_right.x_at(y_bot)))
+                left_line, right_line, lane_kind = min(pairs, key=rank)
         else:
-            def rank(pair):
-                left_line, right_line, _gap = pair
-                mid = (left_line.x_at(y_bot) + right_line.x_at(y_bot)) / 2.0
-                return abs(mid - width / 2.0)
-        left_line, right_line, _gap = min(pairs, key=rank)
-        return left_line, right_line
+            # No history: take the lane the car is actually in (the pair
+            # around the image center). START_LANE only breaks a tie when
+            # the car sits between two lanes at startup.
+            centered = [p for p in pairs if center_dist(p) < 0.5 * lane_px]
+            preferred = ([p for p in centered if p[2] == config.START_LANE]
+                         or centered or pairs)
+            left_line, right_line, lane_kind = min(preferred, key=center_dist)
+        return left_line, right_line, lane_kind
 
     @staticmethod
-    def _pair_blocked(left_line, right_line, lefts, rights, y_bot):
-        """True when some other tape sits between this red and this yellow."""
+    def _pair_blocked(left_line, right_line, lines, y_bot):
+        """True when some other tape sits between these two boundaries."""
         left = left_line.x_at(y_bot)
         right = right_line.x_at(y_bot)
-        for line in lefts:
-            if line is not left_line and left < line.x_at(y_bot) < right:
-                return True
-        for line in rights:
-            if line is not right_line and left < line.x_at(y_bot) < right:
+        for line in lines:
+            if line is left_line or line is right_line:
+                continue
+            if left < line.x_at(y_bot) < right:
                 return True
         return False
+
+    def _fallback_lines(self, reds, yellows, y_bot, width):
+        """One-sided detection when no full-width pair is visible.
+
+        Uses the lane followed last, since one line alone does not say
+        which lane it belongs to.
+        """
+        lane = self._lane
+        if lane == 0:
+            left = self._nearest(reds, self._prev_left, y_bot, width)
+            right = self._nearest(yellows, self._prev_right, y_bot, width)
+        elif lane == 2:
+            left = self._nearest(yellows, self._prev_left, y_bot, width)
+            right = self._nearest(reds, self._prev_right, y_bot, width)
+        else:
+            # Middle lane: both boundaries are yellow.
+            left = self._nearest(yellows, self._prev_left, y_bot, width)
+            others = [line for line in yellows if line is not left]
+            right = self._nearest(others, self._prev_right, y_bot, width)
+        return left, right, lane
 
     def _nearest(self, lines, previous, y_bot, width):
         if not lines:
@@ -316,26 +556,31 @@ class LaneDetector:
             return min(lines, key=lambda line: abs(line.x_at(y_bot) - previous.x_at(y_bot)))
         return min(lines, key=lambda line: abs(line.x_at(y_bot) - width / 2.0))
 
-    def _neighbors(self, left, right, left_extra, right_extra, y_bot, lane_px):
-        """A neighbor lane is the other color just outside this lane, plus
-        its far line about one lane width further out."""
-        neighbor_left = False
-        neighbor_right = False
-        if left is not None:
-            lx = left.x_at(y_bot)
-            near_other = any(lx - 0.55 * lane_px < line.x_at(y_bot) < lx - 0.02 * lane_px
-                           for line in right_extra)
-            far_same = any(lx - 1.5 * lane_px < line.x_at(y_bot) < lx - 0.65 * lane_px
-                             for line in left_extra)
-            neighbor_left = near_other and far_same
-        if right is not None:
-            rx = right.x_at(y_bot)
-            near_other = any(rx + 0.02 * lane_px < line.x_at(y_bot) < rx + 0.55 * lane_px
-                              for line in left_extra)
-            far_same = any(rx + 0.65 * lane_px < line.x_at(y_bot) < rx + 1.5 * lane_px
-                          for line in right_extra)
-            neighbor_right = near_other and far_same
-        return neighbor_left, neighbor_right
+    def _neighbors(self, left, right, reds, yellows, y_bot, lane_px, lane):
+        """Neighbor lanes for RED|YELLOW|YELLOW|RED.
+
+        A neighbor exists when that lane's far boundary is seen about one
+        lane width beyond the pair. Lane 0: a yellow to the right. Lane 1:
+        a red on either side. Lane 2: a yellow to the left.
+        """
+        if left is None or right is None:
+            return False, False
+        lx = left.x_at(y_bot)
+        rx = right.x_at(y_bot)
+
+        def beyond_right(lines):
+            return any(rx + 0.65 * lane_px < line.x_at(y_bot) < rx + 1.5 * lane_px
+                       for line in lines if line is not right)
+
+        def beyond_left(lines):
+            return any(lx - 1.5 * lane_px < line.x_at(y_bot) < lx - 0.65 * lane_px
+                       for line in lines if line is not left)
+
+        if lane == 0:
+            return False, beyond_right(yellows)
+        if lane == 2:
+            return beyond_left(yellows), False
+        return beyond_left(reds), beyond_right(reds)
 
     def draw(self, frame):
         """Draw the last detection on a copy of the frame (for the video).
@@ -368,7 +613,11 @@ class LaneDetector:
         for line in d.get("right_extra", []):
             cv2.line(out, (int(line.x_at(top)), top),
                      (int(line.x_at(y_bot)), y_bot), (0, 180, 180), 1)
-        for line, color in ((d["left"], (0, 0, 255)), (d["right"], (0, 255, 255))):
+        lane = d.get("lane", 0)
+        red, yellow = (0, 0, 255), (0, 255, 255)
+        left_color = red if lane == 0 else yellow
+        right_color = red if lane == 2 else yellow
+        for line, color in ((d["left"], left_color), (d["right"], right_color)):
             if line:
                 cv2.line(out, (int(line.x_at(top)), top),
                          (int(line.x_at(y_bot)), y_bot), color, 3)
@@ -383,10 +632,15 @@ class LaneDetector:
         else:
             side = "R" if info.offset > 0 else "L"
             turn = "R" if info.heading > 0 else "L"
-            l = "R" if info.left_lane_exists else "-"
-            r = "Y" if info.right_lane_exists else "-"
+            l_col = "R" if lane == 0 else "Y"
+            r_col = "R" if lane == 2 else "Y"
+            l = l_col if info.left_lane_exists else "-"
+            r = r_col if info.right_lane_exists else "-"
+            kind = f"L{lane}" + ("" if info.lane_confirmed else "?")
+            if info.lane_pos is not None:
+                kind += f" p{info.lane_pos:.1f}"
             nb = (" <L" if info.neighbor_left else "") + (" R>" if info.neighbor_right else "")
-            text = (f"off {abs(info.offset) * 100:.0f}cm {side}  "
+            text = (f"{kind} off {abs(info.offset) * 100:.0f}cm {side}  "
                     f"head {abs(math.degrees(info.heading)):.0f} {turn}  [{l}|{r}]{nb}")
             self._label(out, text, (0, 255, 0))
         return out

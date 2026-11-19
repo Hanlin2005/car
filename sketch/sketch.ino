@@ -23,7 +23,9 @@ const unsigned long CMD_TIMEOUT_MS = 300;  // stop if Python goes quiet
 const unsigned long WEB_TIMEOUT_MS = 750;  // manual driving, the page sends slower
 const unsigned long CONTROL_PERIOD_MS = 20;    // 50 Hz speed control
 const unsigned long TELEMETRY_PERIOD_MS = 50;  // 20 Hz telemetry
-const float METERS_PER_TICK = 0.0005;      // wheel circumference / ticks per rev
+const float METERS_PER_TICK = 0.00098;     // wheel circumference / ticks per rev. Calibrated 2026-11-19
+                                           // from two tape-measured runs (1.005 m enc -> 1.918 m at 0.0005;
+                                           // 1.016 m enc -> 1.054 m at 0.00095).
 const float KP_STRAIGHT_HOLD = 4.0;        // m/s of trim per meter the wheels differ
 
 // ---------- State ----------
@@ -115,6 +117,14 @@ void setupEncoders() {
   attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_B), onRightB, RISING);
 }
 
+// Speed is averaged over the last SPEED_WINDOW control periods (100 ms at
+// 50 Hz). One period alone is only ~4 ticks at 0.2 m/s, so the speed would
+// jump in 5 cm/s steps and the PI gains would have to stay tiny.
+const int SPEED_WINDOW = 5;
+long winTicksL[SPEED_WINDOW] = {0}, winTicksR[SPEED_WINDOW] = {0};
+float winDt[SPEED_WINDOW] = {0};
+int winIdx = 0;
+
 void updateMeasuredSpeeds(float dt) {
   noInterrupts();
   long l = ticksLeft, r = ticksRight;
@@ -122,8 +132,20 @@ void updateMeasuredSpeeds(float dt) {
   interrupts();
   distLeft += l * METERS_PER_TICK;
   distRight += r * METERS_PER_TICK;
-  speedLeft = l * METERS_PER_TICK / dt;
-  speedRight = r * METERS_PER_TICK / dt;
+  winTicksL[winIdx] = l;
+  winTicksR[winIdx] = r;
+  winDt[winIdx] = dt;
+  winIdx = (winIdx + 1) % SPEED_WINDOW;
+  long sumL = 0, sumR = 0;
+  float sumDt = 0;
+  for (int i = 0; i < SPEED_WINDOW; i++) {
+    sumL += winTicksL[i];
+    sumR += winTicksR[i];
+    sumDt += winDt[i];
+  }
+  if (sumDt <= 0) sumDt = dt;
+  speedLeft = sumL * METERS_PER_TICK / sumDt;
+  speedRight = sumR * METERS_PER_TICK / sumDt;
 }
 
 // ========== Motors ==========
@@ -184,19 +206,30 @@ void brakeMotors() {
 
 // ========== Speed control (feed-forward + PI, per wheel) ==========
 // Feed-forward from the duty-cycle benchmark (speed is close to linear in duty):
-//   left 100% -> 0.597 m/s, right 100% -> 0.571 m/s (right is ~4% slower)
-// Measured on the MDD3A. Re-run python/dutycycletest.py on the DRV8833 and
-// whenever the battery or METERS_PER_TICK changes.
-const float KF_LEFT = 422.0;    // PWM per m/s
-const float KF_RIGHT = 441.0;
+//   left 100% -> 0.75 m/s, right 100% -> 0.78 m/s (right is ~3-4% FASTER)
+// Measured on the DRV8833, wheels in the air, 2026-11-19 (python/dutycycletest.py).
+// Linear fit: left 331 PWM per m/s, right 322. Re-run whenever the battery,
+// the driver, or METERS_PER_TICK changes.
+const float KF_LEFT = 331.0;    // PWM per m/s
+const float KF_RIGHT = 322.0;
 // Breakaway PWM on the foam (air was ~15 each). Right needs more on the mat.
 // "Both" started at ~33 when the caster was straight; single-wheel needs more
 // because the car yaws and the caster scrubs. Use the per-wheel mat values.
-const float PWM_OFFSET_LEFT = 51.0;   // ~20% duty
-const float PWM_OFFSET_RIGHT = 64.0;  // ~25% duty
-const float KP_SPEED = 200.0;
-const float KI_SPEED = 400.0;
-const float I_LIMIT = 40.0;     // max PWM the integral can add
+// In the air the fit crosses zero at ~6 PWM; on the floor the wheels need more
+// to break away. 51/64 came from the old driver on the mat; 40 each is a
+// middle value for the DRV8833 and the PI integral (+/-80) covers the rest.
+const float PWM_OFFSET_LEFT = 40.0;   // ~16% duty
+const float PWM_OFFSET_RIGHT = 40.0;
+// Loop gain KP/KF ~1.4: a 10% speed error at 0.2 m/s now gives ~6 PWM of
+// correction instead of 2. Only possible because the speed is averaged over
+// SPEED_WINDOW periods (see updateMeasuredSpeeds). Raised 2026-11-19 after
+// the turn test showed wheels running ~3 cm/s off their commands uncorrected.
+const float KP_SPEED = 300.0;   // PWM per m/s of error
+const float KI_SPEED = 250.0;   // PWM per m/s per second. 600 wound up on every speed
+                                // change and the wheels overshot ~0.5 s late, which made
+                                // lane following oscillate (run 2026-11-19 16:42).
+const float I_BAND = 0.08;      // m/s: only integrate inside this error band (anti-windup)
+const float I_LIMIT = 50.0;     // max PWM the integral can add
 
 // With speed control off, only the feed-forward is used: power comes from
 // the target speed alone and the encoders don't correct it.
@@ -205,7 +238,11 @@ int speedToPower(SpeedPI& pi, float kf, float offset, float target, float measur
   float ff = kf * target + (target > 0 ? offset : -offset);
   if (!speedControlEnabled) { pi.integral = 0; return (int)ff; }
   float error = target - measured;
-  pi.integral = constrain(pi.integral + KI_SPEED * error * dt, -I_LIMIT, I_LIMIT);
+  // Big errors are transients (just started, or a step in the command): let
+  // the feed-forward and P term handle those and only integrate the residual.
+  if (fabs(error) < I_BAND) {
+    pi.integral = constrain(pi.integral + KI_SPEED * error * dt, -I_LIMIT, I_LIMIT);
+  }
   return (int)(ff + KP_SPEED * error + pi.integral);
 }
 
@@ -527,7 +564,8 @@ void loop() {
     // An obstacle brakes. Python going quiet coasts (see driveMotor).
     readTofFront();
     bool tofClose = tofM >= 0 && tofM < STOP_DISTANCE_M;
-    bool wantEstop = runMode == "drive" || runMode == "straight_test";
+    bool wantEstop = runMode == "drive" || runMode == "heading_align" ||
+                     runMode == "straight_test";
     unsigned long timeout = runMode == "web" ? WEB_TIMEOUT_MS : CMD_TIMEOUT_MS;
     bool pythonSilent = lastCmdMs == 0 || (now - lastCmdMs) > timeout;
     estop = wantEstop && (tofClose || (front >= 0 && front < STOP_DISTANCE_M));

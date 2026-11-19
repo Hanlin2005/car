@@ -40,6 +40,18 @@ _PAGE = r"""<!DOCTYPE html>
              justify-content: center; margin: 0; padding: 16px; text-align: center;
              color: #c8c2b2; }
   .hidden { display: none !important; }
+  .lanebar { display: flex; align-items: center; gap: 10px; margin: 10px 0 0; }
+  .lanebar .title { color: #c8c2b2; font-size: 15px; font-weight: 600; }
+  .lanes3 { display: flex; flex: 1; max-width: 320px; height: 34px;
+            border-radius: 6px; overflow: hidden; background: #26291e; }
+  .lanes3 .tape { width: 5px; flex: none; }
+  .lanes3 .tape.red { background: #d23b2a; }
+  .lanes3 .tape.yellow { background: #e0b03a; }
+  .lanes3 .cell { flex: 1; display: flex; align-items: center; justify-content: center;
+                  font-size: 13px; color: #9a947f; }
+  .lanes3 .cell.here { background: #3d5a1e; color: #ece7da; font-weight: 600; }
+  .lanes3 .cell.here.unsure { background: #4d4a1e; }
+  #lane-text { color: #c8c2b2; font-size: 14px; min-width: 7em; }
   details { margin: 12px 0 0; }
   summary { cursor: pointer; color: #c8c2b2; font-weight: 600; font-size: 15px; }
   img.birdseye { display: block; margin: 8px auto 0; max-width: 100%; height: auto;
@@ -84,6 +96,16 @@ _PAGE = r"""<!DOCTYPE html>
     <img id="video" src="/stream.mjpg" alt="Camera">
     <p id="novideo" class="novideo">No camera frame yet. Check the camera ribbon cable on the Media Carrier.</p>
   </div>
+  <div class="lanebar">
+    <span class="title">Lane</span>
+    <div class="lanes3" id="lane-diagram" aria-label="Which lane the camera sees">
+      <span class="tape red"></span><span class="cell" data-lane="0">1</span>
+      <span class="tape yellow"></span><span class="cell" data-lane="1">2</span>
+      <span class="tape yellow"></span><span class="cell" data-lane="2">3</span>
+      <span class="tape red"></span>
+    </div>
+    <span id="lane-text">No lane</span>
+  </div>
 
   <details id="birdseye-panel">
     <summary>Top-down view</summary>
@@ -118,7 +140,7 @@ _PAGE = r"""<!DOCTYPE html>
   <p id="all-lights-error" class="bad" role="status" hidden></p>
 
   <label class="speed">Speed
-    <input id="speed" type="range" min="0.05" max="0.57" step="0.01" value="0.30">
+    <input id="speed" type="range" min="0.05" max="0.75" step="0.01" value="0.30">
     <span id="speed-label">0.30 m/s</span>
   </label>
   <p class="note">Manual driving, lane following, and the straight-line test use this speed. A close obstacle uses half of it.</p>
@@ -264,6 +286,8 @@ const runBtn = document.getElementById("run");
 const haltBtn = document.getElementById("halt");
 const laneLeft = document.getElementById("lane-left");
 const laneRight = document.getElementById("lane-right");
+const laneCells = Array.from(document.querySelectorAll("#lane-diagram .cell"));
+const laneText = document.getElementById("lane-text");
 const keys = {ArrowUp:"forward", w:"forward", W:"forward",
               ArrowDown:"back", s:"back", S:"back",
               ArrowLeft:"left", a:"left", A:"left",
@@ -323,6 +347,7 @@ function apply(data) {
   document.getElementById("lamps").classList.toggle("hidden", running !== "light_test");
   document.getElementById("lanes").classList.toggle("hidden", running !== "drive");
   showLanes(data);
+  showCurrentLane(data.lane);
   runBtn.disabled = running !== null;
   haltBtn.disabled = running === null;
   stateEl.classList.toggle("bad", data.result && data.result.startsWith("error"));
@@ -431,7 +456,7 @@ function showSpeed() {
   speedLabel.textContent = Number(speed.value).toFixed(2) + " m/s";
 }
 const savedSpeed = Number(localStorage.getItem("speed"));
-if (savedSpeed >= 0.05 && savedSpeed <= 0.57) speed.value = String(savedSpeed);
+if (savedSpeed >= 0.05 && savedSpeed <= 0.75) speed.value = String(savedSpeed);
 showSpeed();
 function postSpeed() {
   localStorage.setItem("speed", speed.value);
@@ -591,6 +616,28 @@ hueOffset.addEventListener("input", () => {
 });
 hueOffset.addEventListener("change", saveHue);
 
+function showCurrentLane(lane) {
+  // lane: {index, confirmed, left, right} from the camera, or null.
+  laneCells.forEach((cell) => {
+    const here = !!lane && Number(cell.dataset.lane) === lane.index;
+    cell.classList.toggle("here", here);
+    cell.classList.toggle("unsure", here && !lane.confirmed);
+  });
+  if (!lane) {
+    laneText.textContent = "No lane";
+    return;
+  }
+  const names = ["Left", "Middle", "Right"];
+  const seen = (lane.left || "-") + " | " + (lane.right || "-");
+  let where = "";
+  if (typeof lane.pos === "number") {
+    // Position inside the lane: 0% at its left line, 100% at its right line.
+    const frac = Math.min(1, Math.max(0, lane.pos - lane.index));
+    where = " · " + Math.round(frac * 100) + "% across";
+  }
+  laneText.textContent = (names[lane.index] || ("Lane " + (lane.index + 1))) +
+    (lane.confirmed ? "" : " (unsure)") + where + " · " + seen;
+}
 function showLanes(data) {
   const left = running === "drive" && !!data.lane_left;
   const right = running === "drive" && !!data.lane_right;
@@ -1099,6 +1146,7 @@ class _Handler(BaseHTTPRequestHandler):
         lane_left, lane_right = modes.lane_availability()
         out["lane_left"] = lane_left
         out["lane_right"] = lane_right
+        out["lane"] = _current_lane()
         if since is not None:
             lines, next_id = modes.log.since(since)
             out["log"] = [line for _, line in lines]
@@ -1124,6 +1172,22 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             else:
                 time.sleep(0.03)
+
+
+def _current_lane():
+    """Which lane the camera sees right now, for the page. None if no lane."""
+    _frame_id, frame_time, lane, _jpeg = vision.latest()
+    if lane is None or time.monotonic() - frame_time > 1.0:
+        return None
+    colors = {0: ("red", "yellow"), 1: ("yellow", "yellow"), 2: ("yellow", "red")}
+    left_col, right_col = colors.get(lane.lane_index, ("?", "?"))
+    return {
+        "index": lane.lane_index,
+        "pos": None if lane.lane_pos is None else round(float(lane.lane_pos), 2),
+        "confirmed": bool(lane.lane_confirmed),
+        "left": left_col if lane.left_lane_exists else None,
+        "right": right_col if lane.right_lane_exists else None,
+    }
 
 
 def _urls(port):

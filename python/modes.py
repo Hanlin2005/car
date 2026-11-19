@@ -23,16 +23,22 @@ MODES = collections.OrderedDict([
              "Drive with the buttons or WASD / arrow keys. Releasing stops the car.",
              False)),
     ("drive", ("Lane following",
-               "Tracks a 2D lane-center path with wheel odometry, corrected by the "
-               "red (left) and yellow (right) lines. "
-               "Put the car in the left lane. Left and Right appear while this is running. "
+               "Tracks a 2D lane-center path with wheel odometry. Three lanes, "
+               "red|yellow, yellow|yellow, yellow|red; the camera tells which one. "
+               "Left and Right appear while this is running. "
                "Press one to move into that lane and stay there. It starts moving 3 s after Run.",
                True)),
     ("heading_align", ("Heading align",
                        "Spins in place until the car faces straight along the lane lines, "
-                       "then stops. Needs the red and yellow lines in view. "
+                       "then stops. Needs both boundaries of the current lane in view. "
                        "Starts 3 s after Run.",
                        True)),
+    ("turn_test", ("Turn test",
+                   "Calibrates turning. Spins in place +/-20 deg three times each way, "
+                   "then arcs, comparing encoder angle with camera heading. Prints the "
+                   "effective wheel base to set as WHEEL_BASE_M. Car on the floor in a "
+                   "lane with both lines in view. Starts 3 s after Run.",
+                   True)),
     ("straight_test", ("Straight-line test",
                        "Drives 1 m straight using the wheel encoders. Car on the floor. "
                        "Starts 3 s after Run.",
@@ -291,6 +297,7 @@ def _run_drive(stop_event):
           f"Starting in lane {config.START_LANE}.")
     last_id = None
     last_print = 0.0
+    lost_since = None
     rec = _Recorder() if config.RECORD_DRIVE else None
 
     while not stop_event.is_set():
@@ -316,12 +323,32 @@ def _run_drive(stop_event):
         if request and planner.state in (IDLE, FOLLOW_LANE, SLOW):
             planner.request(request)
         state, speed, target = planner.update(lane, obstacles, car_link.telemetry)
+        if planner.state != IDLE and speed > 0 and config.DRIVE_RAMP_S > 0:
+            # Ease into cruise: the caster swings the nose hardest when the
+            # car lurches off from rest, and the controller cannot catch that.
+            ramp = min(1.0, (now - go_at) / config.DRIVE_RAMP_S)
+            speed *= config.DRIVE_RAMP_START + (1.0 - config.DRIVE_RAMP_START) * max(0.0, ramp)
         set_lane_availability(planner.left_available, planner.right_available)
         left, right = follower.update(
             lane, speed, target, telemetry=car_link.telemetry, relock=planner.relock)
         car_link.set_wheel_speeds(left, right)
         if rec is not None and planner.state != IDLE:
             rec.add(frame_id, lane, follower, planner.state, left, right)
+
+        # The run ends when the lane stays gone: the tape ran out, or the car
+        # was picked up. Otherwise it would sit and resume when lines reappear.
+        if planner.state != IDLE and lane is None:
+            if lost_since is None:
+                lost_since = now
+            elif now - lost_since > config.DRIVE_END_LOST_S:
+                car_link.set_wheel_speeds(0.0, 0.0)
+                detail = (f"end of track: no lane for {config.DRIVE_END_LOST_S:.1f} s "
+                          f"| lane {planner.lane_index}")
+                print("Lane following: no lane for "
+                      f"{config.DRIVE_END_LOST_S:.1f} s, stopping (end of track).")
+                break
+        else:
+            lost_since = None
 
         if planner.state == IDLE:
             state = f"starting in {max(0.0, go_at - now):.1f} s"
@@ -389,7 +416,7 @@ def _run_heading_align(stop_event):
                       f"({heading * 57.3:+.0f} deg)")
             break
 
-        # Prefer both lines: vanishing-point heading is much more reliable then.
+        # Prefer both boundaries: vanishing-point heading is much more reliable then.
         if lane is not None and lane.left_lane_exists and lane.right_lane_exists:
             raw = max(-config.LANE_MAX_HEADING,
                       min(config.LANE_MAX_HEADING, lane.heading))
@@ -484,6 +511,16 @@ class _Recorder:
         self.csv.flush()
 
 
+def _run_turn_test(stop_event):
+    import turntest
+
+    def show(text):
+        global detail
+        detail = text
+
+    turntest.run(stop_event, on_progress=show)
+
+
 def _run_straight(stop_event):
     import straightlinetest
     straightlinetest.reset()
@@ -531,6 +568,7 @@ _RUNNERS = {
     "web": _run_web,
     "drive": _run_drive,
     "heading_align": _run_heading_align,
+    "turn_test": _run_turn_test,
     "straight_test": _run_straight,
     "motor_test": _run_motor,
     "duty_test": _run_duty,
