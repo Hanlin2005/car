@@ -14,6 +14,15 @@ def set_wheel_speeds(left, right):
     hardware.set_wheel_speeds(left, right)
 
 
+def set_speed_control(enabled):
+    """Turn the per-wheel encoder speed controller on or off."""
+    hardware.set_speed_control(enabled)
+
+
+def speed_control_enabled():
+    return hardware.speed_control_enabled()
+
+
 def set_straight_hold(enabled):
     """Turn encoder-difference straightening on or off while driving straight."""
     hardware.set_straight_hold(enabled)

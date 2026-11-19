@@ -23,10 +23,16 @@ MODES = collections.OrderedDict([
              "Drive with the buttons or WASD / arrow keys. Releasing stops the car.",
              False)),
     ("drive", ("Lane following",
-               "Follows the yellow (left) and red (right) lines. "
+               "Tracks a 2D lane-center path with wheel odometry, corrected by the "
+               "red (left) and yellow (right) lines. "
                "Put the car in the left lane. Left and Right appear while this is running. "
                "Press one to move into that lane and stay there. It starts moving 3 s after Run.",
                True)),
+    ("heading_align", ("Heading align",
+                       "Spins in place until the car faces straight along the lane lines, "
+                       "then stops. Needs the red and yellow lines in view. "
+                       "Starts 3 s after Run.",
+                       True)),
     ("straight_test", ("Straight-line test",
                        "Drives 1 m straight using the wheel encoders. Car on the floor. "
                        "Starts 3 s after Run.",
@@ -311,7 +317,8 @@ def _run_drive(stop_event):
             planner.request(request)
         state, speed, target = planner.update(lane, obstacles, car_link.telemetry)
         set_lane_availability(planner.left_available, planner.right_available)
-        left, right = follower.update(lane, speed, target, relock=planner.relock)
+        left, right = follower.update(
+            lane, speed, target, telemetry=car_link.telemetry, relock=planner.relock)
         car_link.set_wheel_speeds(left, right)
         if rec is not None and planner.state != IDLE:
             rec.add(frame_id, lane, follower, planner.state, left, right)
@@ -322,10 +329,13 @@ def _run_drive(stop_event):
             state = "LANE_LOST"
         seen = "no lane" if lane is None else \
             f"off {lane.offset * 100:+.1f} cm, head {lane.heading:+.2f}"
+        pose = follower.pose
+        pose_txt = (f"pose x {pose.x * 100:+.1f} cm th {pose.theta:+.2f}"
+                    if pose.locked else "pose unlocked")
         front = "---" if obstacles.front == float("inf") else f"{obstacles.front:.2f} m"
         changing = f" {planner.change_direction} {planner.phase}" if planner.phase else ""
         detail = (f"lane {planner.lane_index} | {state}{changing} | {seen} | "
-                  f"turn {follower.omega:+.2f} | "
+                  f"{pose_txt} | turn {follower.omega:+.2f} | "
                   f"rejected {follower.rejected} | "
                   f"L {left:.2f} R {right:.2f} m/s | front {front}")
         if now - last_print > 0.5:
@@ -333,6 +343,103 @@ def _run_drive(stop_event):
             print(detail)
     set_lane_availability(False, False)
     take_lane_request()
+
+
+def _run_heading_align(stop_event):
+    """Spin until camera heading is ~0 (nose parallel to the lane), then stop."""
+    global detail
+    import vision
+
+    vision.reset_lane_track()
+    go_at = time.monotonic() + config.DRIVE_START_DELAY_S
+    print(f"Heading align starts in {config.DRIVE_START_DELAY_S:.0f} s. "
+          "Point the camera at the red and yellow lines.")
+    last_id = None
+    last_print = 0.0
+    heading = None
+    good_since = None
+    lost_since = None
+    done = False
+
+    while not stop_event.is_set():
+        wait_until = time.monotonic() + 0.3
+        while not stop_event.is_set():
+            frame_id, frame_time, lane, _ = vision.latest()
+            if frame_id != last_id or time.monotonic() > wait_until:
+                break
+            time.sleep(0.005)
+        if stop_event.is_set():
+            break
+        now = time.monotonic()
+        if frame_id == last_id or now - frame_time > 0.3:
+            lane = None
+        last_id = frame_id
+
+        if now < go_at:
+            car_link.set_wheel_speeds(0.0, 0.0)
+            detail = f"starting in {max(0.0, go_at - now):.1f} s"
+            if now - last_print > 0.5:
+                last_print = now
+                print(detail)
+            continue
+
+        if done:
+            car_link.set_wheel_speeds(0.0, 0.0)
+            detail = (f"aligned | head {heading:+.2f} rad "
+                      f"({heading * 57.3:+.0f} deg)")
+            break
+
+        # Prefer both lines: vanishing-point heading is much more reliable then.
+        if lane is not None and lane.left_lane_exists and lane.right_lane_exists:
+            raw = max(-config.LANE_MAX_HEADING,
+                      min(config.LANE_MAX_HEADING, lane.heading))
+            if heading is None:
+                heading = raw
+            else:
+                a = config.HEADING_ALIGN_FILTER
+                heading = (1.0 - a) * heading + a * raw
+            lost_since = None
+        else:
+            if lost_since is None:
+                lost_since = now
+            if lost_since is not None and now - lost_since > config.HEADING_ALIGN_LOST_S:
+                car_link.set_wheel_speeds(0.0, 0.0)
+                detail = "LANE_LOST — need both red and yellow lines"
+                if now - last_print > 0.5:
+                    last_print = now
+                    print(detail)
+                # Keep waiting; user can re-aim the car. Don't exit as failed.
+            else:
+                car_link.set_wheel_speeds(0.0, 0.0)
+                detail = "waiting for both lane lines"
+            continue
+
+        if abs(heading) <= config.HEADING_ALIGN_DONE:
+            if good_since is None:
+                good_since = now
+            car_link.set_wheel_speeds(0.0, 0.0)
+            if now - good_since >= config.HEADING_ALIGN_SETTLE_S:
+                done = True
+                print(f"Heading align: done (head {heading:+.3f} rad).")
+            detail = (f"settling | head {heading:+.2f} rad "
+                      f"({heading * 57.3:+.0f} deg)")
+        else:
+            good_since = None
+            # heading > 0 (nose right of lane) -> spin left: left back, right forward.
+            spin = max(-config.HEADING_ALIGN_MAX_SPEED,
+                       min(config.HEADING_ALIGN_MAX_SPEED,
+                           config.HEADING_ALIGN_KP * heading))
+            left, right = -spin, spin
+            car_link.set_wheel_speeds(left, right)
+            detail = (f"aligning | head {heading:+.2f} rad "
+                      f"({heading * 57.3:+.0f} deg) | "
+                      f"L {left:+.2f} R {right:+.2f} m/s")
+
+        if now - last_print > 0.5:
+            last_print = now
+            print(detail)
+
+    car_link.set_wheel_speeds(0.0, 0.0)
 
 
 class _Recorder:
@@ -423,6 +530,7 @@ def _run_motor2(stop_event):
 _RUNNERS = {
     "web": _run_web,
     "drive": _run_drive,
+    "heading_align": _run_heading_align,
     "straight_test": _run_straight,
     "motor_test": _run_motor,
     "duty_test": _run_duty,

@@ -46,6 +46,7 @@ bool lightOk = false;
 VL53L1X tof;
 BH1750 lightMeter;
 String runMode = "idle";
+bool speedControlEnabled = true;   // web page can turn the per-wheel encoder PI off
 bool straightHoldEnabled = true;   // web page can turn encoder straightening off
 bool straightHoldOn = false;
 float straightRef = 0;
@@ -188,16 +189,23 @@ void brakeMotors() {
 // whenever the battery or METERS_PER_TICK changes.
 const float KF_LEFT = 422.0;    // PWM per m/s
 const float KF_RIGHT = 441.0;
-const float PWM_OFFSET = 3.0;   // PWM needed just to start moving
+// Breakaway PWM on the foam (air was ~15 each). Right needs more on the mat.
+// "Both" started at ~33 when the caster was straight; single-wheel needs more
+// because the car yaws and the caster scrubs. Use the per-wheel mat values.
+const float PWM_OFFSET_LEFT = 51.0;   // ~20% duty
+const float PWM_OFFSET_RIGHT = 64.0;  // ~25% duty
 const float KP_SPEED = 200.0;
 const float KI_SPEED = 400.0;
 const float I_LIMIT = 40.0;     // max PWM the integral can add
 
-int speedToPower(SpeedPI& pi, float kf, float target, float measured, float dt) {
+// With speed control off, only the feed-forward is used: power comes from
+// the target speed alone and the encoders don't correct it.
+int speedToPower(SpeedPI& pi, float kf, float offset, float target, float measured, float dt) {
   if (target == 0) { pi.integral = 0; return 0; }
+  float ff = kf * target + (target > 0 ? offset : -offset);
+  if (!speedControlEnabled) { pi.integral = 0; return (int)ff; }
   float error = target - measured;
   pi.integral = constrain(pi.integral + KI_SPEED * error * dt, -I_LIMIT, I_LIMIT);
-  float ff = kf * target + (target > 0 ? PWM_OFFSET : -PWM_OFFSET);
   return (int)(ff + KP_SPEED * error + pi.integral);
 }
 
@@ -315,6 +323,11 @@ void set_lamps(bool rear1, bool rear2, bool head) {
   lightsOn = rear1 || rear2 || head;
 }
 
+// Web page toggle. Off drives each wheel from feed-forward only.
+void set_speed_control(bool enabled) {
+  speedControlEnabled = enabled;
+}
+
 // Web page toggle. Off leaves the commanded wheel speeds alone.
 void set_straight_hold(bool enabled) {
   straightHoldEnabled = enabled;
@@ -417,6 +430,7 @@ void setup() {
   Bridge.provide("set_duty", set_duty);
   Bridge.provide("stop", stop_car);
   Bridge.provide("set_mode", set_mode);
+  Bridge.provide("set_speed_control", set_speed_control);
   Bridge.provide("set_straight_hold", set_straight_hold);
   Bridge.provide("set_lamps", set_lamps);
   Bridge.provide("set_all_lights", set_all_lights);
@@ -534,8 +548,10 @@ void loop() {
         if (right > 0) right = 0;
       }
       holdStraight(left, right);
-      driveMotor(LEFT_IN1, LEFT_IN2, speedToPower(piLeft, KF_LEFT, left, speedLeft, dt));
-      driveMotor(RIGHT_IN1, RIGHT_IN2, speedToPower(piRight, KF_RIGHT, right, speedRight, dt));
+      driveMotor(LEFT_IN1, LEFT_IN2,
+                 speedToPower(piLeft, KF_LEFT, PWM_OFFSET_LEFT, left, speedLeft, dt));
+      driveMotor(RIGHT_IN1, RIGHT_IN2,
+                 speedToPower(piRight, KF_RIGHT, PWM_OFFSET_RIGHT, right, speedRight, dt));
     }
   }
 

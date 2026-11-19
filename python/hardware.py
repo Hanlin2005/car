@@ -48,6 +48,7 @@ _pending = {
     "left": 0.0,
     "right": 0.0,
     "mode": "idle",
+    "speed_control": True,   # per-wheel encoder PI, web page toggle
     "straight_hold": True,   # encoder-difference straightening, web page toggle
     "all_lights": False,
     "rear1": False,
@@ -130,12 +131,14 @@ def pump():
         left = _pending["left"]
         right = _pending["right"]
         mode = _pending["mode"]
+        speed_control = _pending["speed_control"]
         straight_hold = _pending["straight_hold"]
         all_lights = _pending["all_lights"]
         rear1 = _pending["rear1"]
         rear2 = _pending["rear2"]
         head = _pending["head"]
     _Bridge.notify("set_mode", mode)
+    _Bridge.notify("set_speed_control", bool(speed_control))
     _Bridge.notify("set_straight_hold", bool(straight_hold))
     _Bridge.notify("set_all_lights", all_lights)
     _Bridge.notify("set_lamps", bool(rear1), bool(rear2), bool(head))
@@ -182,6 +185,17 @@ def lamp_state():
             "rear2": bool(_pending["rear2"]),
             "head": bool(_pending["head"]),
         }
+
+
+def set_speed_control(enabled):
+    """Turn the per-wheel encoder speed controller on or off. All driving modes."""
+    with _lock:
+        _pending["speed_control"] = bool(enabled)
+
+
+def speed_control_enabled():
+    with _lock:
+        return bool(_pending["speed_control"])
 
 
 def set_straight_hold(enabled):

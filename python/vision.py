@@ -15,7 +15,9 @@ from pathlib import Path
 import config
 
 _lock = threading.Lock()
-_state = {"id": 0, "time": 0.0, "lane": None, "jpeg": None, "frame": None}
+_state = {"id": 0, "time": 0.0, "lane": None, "jpeg": None, "frame": None,
+          "birdseye": None}
+_birdseye_wanted = 0.0    # monotonic time the top-down view was last asked for
 _started = False
 _reset_track = False
 _calibration_lock = threading.Lock()
@@ -87,6 +89,14 @@ def latest_frame():
         return _state["id"], _state["frame"]
 
 
+def latest_birdseye():
+    """The newest top-down view JPEG, or None. Asking keeps it being drawn."""
+    global _birdseye_wanted
+    with _lock:
+        _birdseye_wanted = time.monotonic()
+        return _state["birdseye"]
+
+
 def camera_ok():
     with _lock:
         return _state["jpeg"] is not None
@@ -100,7 +110,9 @@ def _loop():
     if not camera.ok:
         return
     import cv2
+    from birdseye import BirdsEye
     detector = LaneDetector()
+    birdseye = BirdsEye()
     previous_offset = 0
     while True:
         try:
@@ -121,6 +133,13 @@ def _loop():
             lane = detector.detect(frame, hue_offset=offset)
             shown = detector.draw(frame) if config.SHOW_LANES else frame
             ok, buf = cv2.imencode(".jpg", shown, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            top = None
+            with _lock:
+                watched = time.monotonic() - _birdseye_wanted < 2.0
+            if watched:
+                top_ok, top_buf = cv2.imencode(".jpg", birdseye.render(shown, detector),
+                                               [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                top = top_buf.tobytes() if top_ok else None
             with _lock:
                 _state["id"] += 1
                 _state["time"] = time.monotonic()
@@ -128,6 +147,7 @@ def _loop():
                 _state["frame"] = frame
                 if ok:
                     _state["jpeg"] = buf.tobytes()
+                _state["birdseye"] = top
         except Exception as exc:
             print(f"Camera read failed: {exc}")
             time.sleep(0.5)

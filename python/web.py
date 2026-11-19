@@ -40,6 +40,10 @@ _PAGE = r"""<!DOCTYPE html>
              justify-content: center; margin: 0; padding: 16px; text-align: center;
              color: #c8c2b2; }
   .hidden { display: none !important; }
+  details { margin: 12px 0 0; }
+  summary { cursor: pointer; color: #c8c2b2; font-weight: 600; font-size: 15px; }
+  img.birdseye { display: block; margin: 8px auto 0; max-width: 100%; height: auto;
+                 image-rendering: pixelated; background: #000; }
   .modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .modes button { height: 52px; font-size: 14px; }
   .modes button.selected { border: 2px solid #e0b03a; }
@@ -81,6 +85,12 @@ _PAGE = r"""<!DOCTYPE html>
     <p id="novideo" class="novideo">No camera frame yet. Check the camera ribbon cable on the Media Carrier.</p>
   </div>
 
+  <details id="birdseye-panel">
+    <summary>Top-down view</summary>
+    <img id="birdseye" class="birdseye" alt="Top-down view of the floor ahead">
+    <p class="note">The camera image mapped onto the floor. Grid squares are 10 cm; the green box is the car. Straight tape should show as two parallel lines one lane width apart. The scale comes from LANE_WIDTH_M, so it is only as right as that number.</p>
+  </details>
+
   <label class="check">
     <input id="hue-enabled" type="checkbox" disabled>
     Hue calibration
@@ -112,6 +122,12 @@ _PAGE = r"""<!DOCTYPE html>
     <span id="speed-label">0.30 m/s</span>
   </label>
   <p class="note">Manual driving, lane following, and the straight-line test use this speed. A close obstacle uses half of it.</p>
+  <label class="check">
+    <input id="speed-control" type="checkbox" checked>
+    Wheel speed control (encoders)
+    <span id="speed-control-label" class="state">On</span>
+  </label>
+  <p class="note">On: each wheel's encoder corrects its power to hold the commanded speed. Off: power comes from the speed alone, so the wheels can run at different speeds. Applies to every driving mode.</p>
 
   <h2>Vision lane following</h2>
   <label class="check">
@@ -120,10 +136,10 @@ _PAGE = r"""<!DOCTYPE html>
     <span id="vision-label" class="state">On</span>
   </label>
   <label class="speed">Strength
-    <input id="vision-gain" type="range" min="0" max="3" step="0.1" value="1">
+    <input id="vision-gain" type="range" min="0" max="1.5" step="0.05" value="1.0">
     <span id="vision-gain-label">1.0×</span>
   </label>
-  <p class="note">1.0 is the normal steering strength. Off drives straight and ignores the lane lines. A close obstacle still stops the car.</p>
+  <p class="note">1.0 is normal strength. Lower if it zigzags; raise only if it under-steers. Off drives straight and ignores the lane lines.</p>
 
   <div id="lanes" class="hidden">
     <h2>Change lane</h2>
@@ -174,7 +190,26 @@ _PAGE = r"""<!DOCTYPE html>
       <button type="button" data-dir="back">Back</button>
       <span></span>
     </div>
-    <p class="hint">Hold a button, or hold WASD / the arrow keys. Releasing stops the car.</p>
+    <p class="hint">Hold a button, or hold WASD / the arrow keys. Releasing stops the car.
+      Left/Right alone spins in place (one wheel forward, one reverse). Hold Forward with Left/Right to pivot while rolling.</p>
+
+    <h2>Breakaway / PWM test</h2>
+    <p class="note">Raw motor power with no speed control. Pick a wheel, set the duty, and hold Spin.
+      Raise the slider from a full stop until that wheel just starts to turn. Do this on the foam
+      for the real breakaway number; in the air is fine for checking a motor. The code is the same either way.</p>
+    <label class="speed">Wheel
+      <select id="break-wheel">
+        <option value="left">Left</option>
+        <option value="right">Right</option>
+        <option value="both">Both</option>
+      </select>
+    </label>
+    <label class="speed">Duty
+      <input id="break-duty" type="range" min="0" max="100" step="1" value="0">
+      <span id="break-duty-label">0% (PWM 0)</span>
+    </label>
+    <button type="button" id="break-spin">Hold to spin</button>
+    <p id="break-link" class="hint">Release to stop. PWM_OFFSET in the sketch is roughly this PWM value for the slower wheel.</p>
   </div>
 
   <h2>Output</h2>
@@ -184,6 +219,7 @@ _PAGE = r"""<!DOCTYPE html>
 <script>
 const held = new Set();
 let manual = false;
+let breakSpinning = false;
 let modes = [];
 let selected = null;
 let running = null;
@@ -192,8 +228,15 @@ const speed = document.getElementById("speed");
 const speedLabel = document.getElementById("speed-label");
 const correction = document.getElementById("correction");
 const correctionLabel = document.getElementById("correction-label");
+const speedControl = document.getElementById("speed-control");
+const speedControlLabel = document.getElementById("speed-control-label");
 const straightHold = document.getElementById("straight-hold");
 const straightHoldLabel = document.getElementById("straight-hold-label");
+const breakWheel = document.getElementById("break-wheel");
+const breakDuty = document.getElementById("break-duty");
+const breakDutyLabel = document.getElementById("break-duty-label");
+const breakSpin = document.getElementById("break-spin");
+const breakLink = document.getElementById("break-link");
 const vision = document.getElementById("vision");
 const visionLabel = document.getElementById("vision-label");
 const visionGain = document.getElementById("vision-gain");
@@ -270,6 +313,11 @@ function apply(data) {
   selected = data.selected;
   running = data.running;
   manual = running === "web";
+  if (!manual && breakSpinning) {
+    // Mode change already stops the motors; only clear the UI latch here.
+    breakSpinning = false;
+    breakSpin.classList.remove("held");
+  }
   drawModes();
   document.getElementById("manual").classList.toggle("hidden", !manual);
   document.getElementById("lamps").classList.toggle("hidden", running !== "light_test");
@@ -293,6 +341,8 @@ function mark() {
   });
 }
 
+// Tank steer: Left/Right alone spins in place (one wheel forward, one reverse).
+// Forward+Left/Right pivots around the inner wheel.
 function speeds() {
   const s = Number(speed.value);
   const fwd = (held.has("forward") ? 1 : 0) - (held.has("back") ? 1 : 0);
@@ -326,8 +376,45 @@ function show(data, ok) {
     : "Wheels " + l + " / " + r + " m/s";
 }
 
+function breakDuties() {
+  const duty = Number(breakDuty.value);
+  const wheel = breakWheel.value;
+  if (wheel === "left") return {left: duty, right: 0};
+  if (wheel === "right") return {left: 0, right: duty};
+  return {left: duty, right: duty};
+}
+
+function showBreak(data, ok) {
+  if (!ok || !data) {
+    breakLink.textContent = "No connection to the Uno Q";
+    breakLink.classList.add("bad");
+    return;
+  }
+  breakLink.classList.remove("bad");
+  const pwmL = Math.round(Math.abs(data.left) * 255 / 100);
+  const pwmR = Math.round(Math.abs(data.right) * 255 / 100);
+  breakLink.textContent = breakSpinning
+    ? ("Spinning raw duty L " + data.left + "% (PWM " + pwmL +
+       ") / R " + data.right + "% (PWM " + pwmR + "). Release to stop.")
+    : "Release to stop. PWM_OFFSET in the sketch is roughly this PWM value for the slower wheel.";
+}
+
 async function send() {
   if (!manual) return;
+  // Breakaway test owns the motors while Spin is held.
+  if (breakSpinning) {
+    try {
+      const res = await fetch("/duty", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(breakDuties())
+      });
+      showBreak(await res.json(), res.ok);
+    } catch (err) {
+      showBreak(null, false);
+    }
+    return;
+  }
   try {
     const res = await fetch("/drive", {
       method: "POST",
@@ -372,6 +459,72 @@ correction.addEventListener("input", () => {
   showCorrection();
 });
 
+const birdseyePanel = document.getElementById("birdseye-panel");
+const birdseyeImg = document.getElementById("birdseye");
+function showBirdseye() {
+  // Only stream while open: the car draws the view only while someone watches.
+  if (birdseyePanel.open) birdseyeImg.src = "/birdseye.mjpg";
+  else birdseyeImg.removeAttribute("src");
+}
+birdseyePanel.open = localStorage.getItem("birdseye") === "1";
+showBirdseye();
+birdseyePanel.addEventListener("toggle", () => {
+  localStorage.setItem("birdseye", birdseyePanel.open ? "1" : "0");
+  showBirdseye();
+});
+
+function showBreakDuty() {
+  const duty = Number(breakDuty.value);
+  const pwm = Math.round(duty * 255 / 100);
+  breakDutyLabel.textContent = duty + "% (PWM " + pwm + ")";
+}
+breakDuty.value = localStorage.getItem("breakDuty") || "0";
+showBreakDuty();
+breakDuty.addEventListener("input", () => {
+  localStorage.setItem("breakDuty", breakDuty.value);
+  showBreakDuty();
+  if (breakSpinning) send();
+});
+breakWheel.value = localStorage.getItem("breakWheel") || "left";
+breakWheel.addEventListener("change", () => {
+  localStorage.setItem("breakWheel", breakWheel.value);
+  if (breakSpinning) send();
+});
+function setBreakSpinning(on) {
+  breakSpinning = on;
+  breakSpin.classList.toggle("held", on);
+  if (on) {
+    held.clear();
+    mark();
+  }
+  send();
+}
+breakSpin.addEventListener("pointerdown", (event) => {
+  event.preventDefault();
+  if (!manual) return;
+  breakSpin.setPointerCapture(event.pointerId);
+  setBreakSpinning(true);
+});
+function endBreakSpin() {
+  if (!breakSpinning) return;
+  setBreakSpinning(false);
+}
+breakSpin.addEventListener("pointerup", endBreakSpin);
+breakSpin.addEventListener("pointercancel", endBreakSpin);
+breakSpin.addEventListener("lostpointercapture", endBreakSpin);
+
+function showSpeedControl() {
+  speedControlLabel.textContent = speedControl.checked ? "On" : "Off";
+}
+const savedSpeedControl = localStorage.getItem("speedControl");
+speedControl.checked = savedSpeedControl === null ? true : savedSpeedControl === "1";
+showSpeedControl();
+speedControl.addEventListener("change", () => {
+  localStorage.setItem("speedControl", speedControl.checked ? "1" : "0");
+  showSpeedControl();
+  post("/speed-control", {enabled: speedControl.checked}).catch(() => {});
+});
+
 function showStraightHold() {
   straightHoldLabel.textContent = straightHold.checked ? "On" : "Off";
 }
@@ -389,10 +542,15 @@ function showVision() {
   visionGain.disabled = !vision.checked;
   visionGainLabel.textContent = Number(visionGain.value).toFixed(1) + "×";
 }
+let visionSynced = false;  // first /status wins so an old localStorage gain cannot overwrite the car
 const savedVision = localStorage.getItem("vision");
 vision.checked = savedVision === null ? true : savedVision === "1";
 const savedGain = localStorage.getItem("visionGain");
-if (savedGain !== null && savedGain !== "") visionGain.value = savedGain;
+if (savedGain !== null && savedGain !== "") {
+  const g = Number(savedGain);
+  // Old sessions saved gains up to 3×; those weave. Cap what we restore.
+  visionGain.value = String(Math.max(0, Math.min(1.5, g > 1.5 ? 0.5 : g)));
+}
 showVision();
 function postVision() {
   localStorage.setItem("vision", vision.checked ? "1" : "0");
@@ -495,25 +653,33 @@ document.getElementById("stop").addEventListener("pointerdown", (event) => {
   event.preventDefault();
   held.clear();
   mark();
-  send();
+  if (breakSpinning) setBreakSpinning(false);
+  else send();
 });
 
 runBtn.addEventListener("click", async () => apply(await post("/run")));
 async function haltAll() {
-  held.clear(); mark(); send();
+  held.clear(); mark();
+  if (breakSpinning) setBreakSpinning(false);
+  else send();
   apply(await post("/stop"));
 }
 haltBtn.addEventListener("click", haltAll);
 
 window.addEventListener("keydown", (event) => {
   if (event.target === speed || event.target === correction || event.target === straightHold ||
+      event.target === speedControl ||
       event.target === vision || event.target === visionGain ||
       event.target === hueEnabled || event.target === hueOffset ||
-      event.target === rear1 || event.target === rear2 || event.target === head) return;
+      event.target === rear1 || event.target === rear2 || event.target === head ||
+      event.target === breakWheel || event.target === breakDuty || event.target === breakSpin) return;
+  if (breakSpinning) return;
   if (event.key === " " || event.key === "Escape") {
     event.preventDefault();
     if (manual) {
-      held.clear(); mark(); send();
+      held.clear(); mark();
+      if (breakSpinning) setBreakSpinning(false);
+      else send();
     } else if (running) {
       haltAll();
     }
@@ -536,7 +702,8 @@ window.addEventListener("keyup", (event) => {
 window.addEventListener("blur", () => {
   held.clear();
   mark();
-  send();
+  if (breakSpinning) setBreakSpinning(false);
+  else send();
 });
 
 setInterval(send, 200);
@@ -553,12 +720,21 @@ async function refresh() {
       allLights.checked = data.all_lights;
       allLights.disabled = false;
     }
+    if (typeof data.speed_control === "boolean" && data.speed_control !== speedControl.checked) {
+      post("/speed-control", {enabled: speedControl.checked}).catch(() => {});
+    }
     if (typeof data.straight_hold === "boolean" && data.straight_hold !== straightHold.checked) {
       post("/straight-hold", {enabled: straightHold.checked}).catch(() => {});
     }
-    if (typeof data.vision === "boolean" && typeof data.vision_gain === "number" &&
-        (data.vision !== vision.checked || Math.abs(data.vision_gain - Number(visionGain.value)) > 0.001)) {
-      postVision();
+    // Adopt the car's vision settings once. Do NOT push the page's saved gain
+    // onto the car every refresh — that was restoring 2–3× and causing weave.
+    if (!visionSynced && typeof data.vision === "boolean" && typeof data.vision_gain === "number") {
+      vision.checked = data.vision;
+      visionGain.value = String(Math.max(0, Math.min(1.5, data.vision_gain)));
+      localStorage.setItem("vision", vision.checked ? "1" : "0");
+      localStorage.setItem("visionGain", visionGain.value);
+      showVision();
+      visionSynced = true;
     }
     if (typeof data.speed === "number" && Math.abs(data.speed - Number(speed.value)) > 0.001) {
       postSpeed();
@@ -600,6 +776,17 @@ def _clamp_speed(value):
         return None
     limit = config.WEB_MAX_SPEED
     return max(-limit, min(limit, speed))
+
+
+def _clamp_duty(value):
+    """Duty cycle percent for set_duty, -100..100."""
+    try:
+        duty = float(value)
+    except (TypeError, ValueError):
+        return None
+    if duty != duty or duty in (float("inf"), float("-inf")):
+        return None
+    return max(-100.0, min(100.0, duty))
 
 
 def _front_m():
@@ -649,8 +836,9 @@ def _apply(left, right):
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         path = self.path.split("?", 1)[0]
-        if path in ("/drive", "/status", "/stream.mjpg", "/mode", "/run", "/stop",
-                    "/straight-hold", "/vision", "/speed", "/lamps", "/all-lights", "/lane-change"):
+        if path in ("/drive", "/duty", "/status", "/stream.mjpg", "/birdseye.mjpg", "/mode", "/run",
+                    "/stop", "/straight-hold", "/speed-control", "/vision", "/speed", "/lamps",
+                    "/all-lights", "/lane-change"):
             return
         super().log_message(fmt, *args)
 
@@ -682,7 +870,9 @@ class _Handler(BaseHTTPRequestHandler):
                     since = 0
                 self._json(200, self._status(since))
             elif url.path == "/stream.mjpg":
-                self._stream()
+                self._stream(lambda: vision.latest()[3])
+            elif url.path == "/birdseye.mjpg":
+                self._stream(vision.latest_birdseye)
             else:
                 self._send(404, "Not found\n", "text/plain; charset=utf-8")
         except (BrokenPipeError, ConnectionResetError):
@@ -702,6 +892,8 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if path == "/drive":
                 self._drive()
+            elif path == "/duty":
+                self._duty()
             elif path == "/mode":
                 try:
                     modes.select(self._body().get("mode"))
@@ -719,6 +911,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(200, self._status(None))
             elif path == "/straight-hold":
                 self._straight_hold()
+            elif path == "/speed-control":
+                self._speed_control()
             elif path == "/vision":
                 self._vision()
             elif path == "/hue-calibration":
@@ -754,6 +948,29 @@ class _Handler(BaseHTTPRequestHandler):
             return
         self._json(200, _apply(left, right))
 
+    def _duty(self):
+        """Raw PWM duty in percent for the breakaway test. Manual mode only."""
+        if not modes.manual_active():
+            self._json(409, {"error": "manual driving is not running",
+                             "left": 0, "right": 0})
+            return
+        try:
+            payload = self._body()
+            left = _clamp_duty(payload.get("left"))
+            right = _clamp_duty(payload.get("right"))
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+            left = right = None
+        if left is None or right is None:
+            car_link.stop()
+            self._json(400, {"error": "duty must be a number from -100 to 100",
+                             "left": 0, "right": 0})
+            return
+        if left == 0 and right == 0:
+            car_link.stop()
+        else:
+            car_link.set_duty(left, right)
+        self._json(200, {"left": left, "right": right})
+
     def _straight_hold(self):
         try:
             enabled = self._body().get("enabled")
@@ -764,6 +981,17 @@ class _Handler(BaseHTTPRequestHandler):
             return
         car_link.set_straight_hold(enabled)
         self._json(200, {"straight_hold": car_link.straight_hold_enabled()})
+
+    def _speed_control(self):
+        try:
+            enabled = self._body().get("enabled")
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be true or false")
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        car_link.set_speed_control(enabled)
+        self._json(200, {"speed_control": car_link.speed_control_enabled()})
 
     def _vision(self):
         try:
@@ -776,7 +1004,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": str(exc)})
             return
         config.VISION_CONTROL = enabled
-        config.VISION_GAIN = max(0.0, min(3.0, gain))
+        config.VISION_GAIN = max(0.0, min(1.5, gain))
         self._json(200, {"vision": config.VISION_CONTROL, "vision_gain": config.VISION_GAIN})
 
     def _speed(self):
@@ -861,6 +1089,7 @@ class _Handler(BaseHTTPRequestHandler):
             "lux": hardware.sensors["lux"],
             "lights_on": bool(hardware.sensors["lights_on"]),
             "all_lights": hardware.all_lights_enabled(),
+            "speed_control": car_link.speed_control_enabled(),
             "straight_hold": car_link.straight_hold_enabled(),
             "vision": bool(config.VISION_CONTROL),
             "vision_gain": float(config.VISION_GAIN),
@@ -876,14 +1105,14 @@ class _Handler(BaseHTTPRequestHandler):
             out["log_next"] = next_id
         return out
 
-    def _stream(self):
+    def _stream(self, latest_jpeg):
         self.send_response(200)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.end_headers()
         last = None
         while True:
-            _, _, _, jpeg = vision.latest()
+            jpeg = latest_jpeg()
             if jpeg is not None and jpeg is not last:
                 last = jpeg
                 self.wfile.write(

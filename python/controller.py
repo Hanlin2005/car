@@ -1,33 +1,53 @@
-"""Turns 'go this fast, stay at this offset' into left/right wheel speeds.
+"""Turns 'go this fast, stay on the lane' into left/right wheel speeds.
 
-LaneFollower keeps the car driving straight down the middle of the lane:
+LaneFollower tracks a straight lane-center path in 2D:
 
-  1. Throw away readings that can't be real: a heading beyond
-     LANE_MAX_HEADING, or an offset that jumped more than LANE_JUMP_M since
-     the last frame (the car can't move sideways that fast). If the new value
-     keeps showing up for LANE_JUMP_CONFIRM frames, believe it.
-     Then smooth what's left (one noisy frame shouldn't jerk the wheels).
-  2. Turn rate = VISION_GAIN * (KP_OFFSET * how far off center + KP_HEADING *
-     how far the car points away from the lane). The heading term is the
-     damping: it starts straightening the car out before it reaches the
-     center, so it doesn't overshoot and weave. VISION_CONTROL off skips
-     this and drives straight. The page sets both while a run is going.
-  3. Limit how hard and how suddenly it can turn, and slow down while turning.
-  4. If the lane disappears for a moment, keep driving straight (the wheel
-     speed controller holds both wheels equal). If it stays gone longer than
-     LANE_LOST_TIMEOUT_S, stop.
+  1. Wheel encoders update a lane-frame pose (x = right of center, theta =
+     heading). See odometry.py.
+  2. A good camera reading nudges that pose toward the measured offset and
+     heading (not a full rewrite every frame).
+  3. Pure pursuit aims PURE_PURSUIT_LOOKAHEAD_M ahead on the path x = target
+     (usually the lane center). Steering uses the fused pose, so between
+     camera frames the car still follows the line instead of twitching on
+     every noisy image.
+  4. If the camera is gone longer than LANE_LOST_TIMEOUT_S, stop. Brief gaps
+     keep following on odometry alone.
 
-The per-wheel speed control (encoders + PID) is in hardware.py, so "equal
-wheel speeds" really does mean straight even though the two motors differ.
+VISION_CONTROL off drives straight. The page sets that and VISION_GAIN.
 """
 
+import math
 import time
 
 import config
+from odometry import LanePose
 
 
 def _clamp(x, limit):
     return max(-limit, min(limit, x))
+
+
+def _pure_pursuit_omega(offset, heading, target_offset, speed):
+    """Turn rate (rad/s) to arc toward the path x = target_offset.
+
+    Vehicle frame: x right, z forward. omega > 0 turns left (right wheel faster).
+    """
+    err = offset - target_offset
+    dead = getattr(config, "PURE_PURSUIT_DEADZONE_M", 0.0)
+    if abs(err) < dead:
+        err = 0.0
+    ld = config.PURE_PURSUIT_LOOKAHEAD_M
+    cos_h = math.cos(heading)
+    sin_h = math.sin(heading)
+    # Path point (target is already removed via err) at (0, ld) in path frame
+    # relative to the car at (err, 0).
+    x = -err * cos_h - ld * sin_h
+    z = -err * sin_h + ld * cos_h
+    dist2 = x * x + z * z
+    if dist2 < 1e-6:
+        return 0.0
+    kappa = 2.0 * x / dist2
+    return -config.VISION_GAIN * speed * kappa
 
 
 class LaneFollower:
@@ -35,22 +55,23 @@ class LaneFollower:
         self.reset()
 
     def reset(self):
-        self._offset = None
-        self._heading = None
+        self.pose = LanePose()
         self._omega = 0.0
         self._last_seen = None
         self._last_time = None
         self._rejects = 0
-        self.rejected = 0         # bad readings thrown away (for printing)
+        self.rejected = 0
         self.lane_lost = False
-        self.omega = 0.0          # last turn rate (rad/s), for printing
+        self.omega = 0.0
+        # Last camera values (for the log / overlay text).
+        self._offset = None
+        self._heading = None
 
-    def update(self, lane, speed, target_offset, now=None, relock=False):
+    def update(self, lane, speed, target_offset, telemetry=None, now=None, relock=False):
         """Return (left, right) wheel speeds in m/s.
 
-        relock is set for the frame a lane change lands on the new lines.
-        The measured center jumps by about a lane width, so the smoothed
-        offset has to be dropped or that jump is thrown away.
+        telemetry is car_link.telemetry (encoder distances). relock clears the
+        pose so the next good camera frame re-locks the lane path.
         """
         now = time.monotonic() if now is None else now
         dt = 0.05 if self._last_time is None else min(max(now - self._last_time, 0.001), 0.5)
@@ -62,59 +83,66 @@ class LaneFollower:
             return 0.0, 0.0
 
         if relock:
+            self.pose.reset()
+            self._rejects = 0
             self._offset = None
             self._heading = None
-            self._rejects = 0
+
+        if telemetry is not None:
+            if self.pose.locked:
+                self.pose.predict(telemetry)
+            else:
+                # Seed encoder baselines so the first lock does not get a huge Δ.
+                self.pose.capture_baseline(telemetry)
 
         if not config.VISION_CONTROL:
             self._omega = self.omega = 0.0
             self.lane_lost = False
             return speed, speed
 
-        if lane is not None and abs(lane.heading) > config.LANE_MAX_HEADING:
-            lane = None           # no real lane-following angle is that big
-            self.rejected += 1
-        if lane is not None and self._offset is not None and \
-                abs(lane.offset - self._offset) > config.LANE_JUMP_M:
-            self._rejects += 1
-            if self._rejects < config.LANE_JUMP_CONFIRM:
-                lane = None       # sudden jump: skip it unless it persists
-                self.rejected += 1
-            else:
-                self._offset = None   # it persisted: start over from it
         if lane is not None:
-            self._rejects = 0
-            a = config.LANE_FILTER
-            if self._offset is None:
-                self._offset, self._heading = lane.offset, lane.heading
-            else:
-                self._offset = a * lane.offset + (1 - a) * self._offset
-                self._heading = a * lane.heading + (1 - a) * self._heading
+            heading = _clamp(lane.heading, config.LANE_MAX_HEADING)
+            accept = True
+            if self._offset is not None and \
+                    abs(lane.offset - self._offset) > config.LANE_JUMP_M:
+                self._rejects += 1
+                if self._rejects < config.LANE_JUMP_CONFIRM:
+                    accept = False
+                    self.rejected += 1
+                else:
+                    self._offset = None
+            if accept:
+                self._rejects = 0
+                self._offset = lane.offset
+                self._heading = heading
+                both = lane.left_lane_exists and lane.right_lane_exists
+                blend = config.ODOM_CAMERA_BLEND if both else 0.5 * config.ODOM_CAMERA_BLEND
+                if not self.pose.locked:
+                    self.pose.lock(lane.offset, heading)
+                else:
+                    self.pose.correct(lane.offset, heading, blend)
             self._last_seen = now
             self.lane_lost = False
-            # omega > 0 turns left (right wheel faster). Car right of center
-            # or pointing right -> positive error/heading -> turn left.
-            error = self._offset - target_offset
-            target_omega = config.VISION_GAIN * (
-                config.KP_OFFSET * error + config.KP_HEADING * self._heading)
-        else:
-            if self._last_seen is None or now - self._last_seen > config.LANE_LOST_TIMEOUT_S:
-                self.lane_lost = True
-                self._omega = self.omega = 0.0
-                return 0.0, 0.0
-            target_omega = 0.0    # lane briefly gone: go straight
 
+        cam_age = None if self._last_seen is None else now - self._last_seen
+        if not self.pose.locked or cam_age is None or \
+                cam_age > config.ODOM_BLIND_TIMEOUT_S:
+            self.lane_lost = True
+            self._omega = self.omega = 0.0
+            return 0.0, 0.0
+
+        # Follow x = target_offset using the fused pose (encoders bridge camera gaps).
+        self.lane_lost = cam_age > config.LANE_LOST_TIMEOUT_S
+        target_omega = _pure_pursuit_omega(
+            self.pose.x, self.pose.theta, target_offset, speed)
         target_omega = _clamp(target_omega, config.MAX_OMEGA)
-        # Don't snap the steering: change the turn rate gradually.
         step = config.MAX_OMEGA_RATE * dt
         self._omega += _clamp(target_omega - self._omega, step)
         self.omega = self._omega
 
-        # Slow down in proportion to how hard it's turning.
-        turn = abs(self._omega) / config.MAX_OMEGA
+        turn = abs(self._omega) / max(config.MAX_OMEGA, 1e-3)
         v = speed * (1.0 - config.TURN_SLOWDOWN * turn)
 
-        # Differential drive: v - w*b/2 for left, v + w*b/2 for right
         half_base = config.WHEEL_BASE_M / 2
         return v - self._omega * half_base, v + self._omega * half_base
 

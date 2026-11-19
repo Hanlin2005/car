@@ -32,6 +32,7 @@ class Camera:
         self._lock = threading.Lock()
         self._new_frame = threading.Condition(self._lock)
         self._frame = None
+        self._wb_gains = None
         try:
             import cv2
         except ImportError:
@@ -130,15 +131,36 @@ class Camera:
             return cv2.flip(frame, 0)
         return frame
 
+    def _white_balance(self, frame):
+        """Gray-world white balance: scale each channel so the frame averages to gray.
+
+        libcamera has no tuning file for this camera, so its colors come out
+        with a purple cast that moves the tape colors out of their HSV ranges.
+        """
+        if not config.CAMERA_WHITE_BALANCE:
+            return frame
+        import numpy as np
+        means = frame[::4, ::4].reshape(-1, 3).mean(axis=0)
+        gains = np.clip(means.mean() / np.maximum(means, 1.0), 0.5, 2.5)
+        # Smooth over frames so the colors don't flicker as the view changes.
+        if self._wb_gains is None:
+            self._wb_gains = gains
+        else:
+            self._wb_gains = 0.9 * self._wb_gains + 0.1 * gains
+        return self._cv2.transform(frame, np.diag(self._wb_gains).astype(np.float32))
+
+    def _prepare(self, frame):
+        return self._white_balance(self._orient(frame))
+
     def read(self):
         """Return the next frame, or None if the camera is unavailable."""
         if not self.ok:
             return None
         if self._cap is not None:
             ok, frame = self._cap.read()
-            return self._orient(frame) if ok else None
+            return self._prepare(frame) if ok else None
         with self._lock:
             if self._frame is None:
                 self._new_frame.wait(timeout=1.0)
             frame, self._frame = self._frame, None
-        return self._orient(frame) if frame is not None else None
+        return self._prepare(frame) if frame is not None else None
